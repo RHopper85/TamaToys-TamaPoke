@@ -123,6 +123,18 @@ int main(int argc, char **argv) {
   if (pet.awaitingStarter()) { printf("FAIL: click did not register\n"); return 1; }
   printf("PASS: tap reached onTap and picked a starter\n");
 
+  // First-run onboarding now requires a trainer name before entering the
+  // ordinary pet controls. Exercise it through touch, not a direct rename.
+  click(384, 278);  // R
+  click(192, 278);  // O
+  click(128, 174);  // B
+  click(380, 379);  // OK
+  if (strcmp(pet.trainerName, "ROB")) {
+    printf("FAIL: trainer-name onboarding did not commit\n");
+    return 1;
+  }
+  printf("PASS: first-run trainer name saved through touch\n");
+
   // --fast must still do its job: with no finger down, game time has to run at
   // the scale. Otherwise the touch fix would have quietly neutered the flag.
   uint32_t t0 = millis();

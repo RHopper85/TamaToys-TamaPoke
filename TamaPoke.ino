@@ -102,6 +102,7 @@ bool cardOpen = false;        // ficha del bicho (deslizar vertical)
 bool kbOpen = false;
 enum : uint8_t { KB_PET = 0, KB_TRAINER };
 uint8_t kbTarget = KB_PET;          // teclado para renombrar al bicho
+bool kbOnboarding = false;          // mandatory name entry after first starter pick
 char nameBuf[12] = "";
 uint8_t nameLen = 0;
 #define CARD_PAGES 4   // profile, stats, moves, progress -- medals moved to
@@ -171,6 +172,13 @@ bool clockOpen = false;       // pantalla de ajuste de hora (deslizar abajo)
 int clockH = 12, clockM = 0;  // hora en edicion
 bool settingsOpen = false;    // settings hub (time/sound and wireless)
 bool wifiOpen = false;
+bool friendsOpen = false;     // child screen of the existing Player card
+enum : uint8_t { FRIEND_HOME, FRIEND_LIST, FRIEND_ADD, FRIEND_REQUESTS, FRIEND_DETAIL, FRIEND_REMOVE };
+uint8_t friendsView = FRIEND_HOME;
+uint8_t friendSelected = 0;
+char friendCodeEntry[13] = "";
+uint8_t friendCodeEntryLen = 0;
+char friendMessage[48] = "";
 enum : uint8_t { WIFI_HOME, WIFI_NEARBY, WIFI_SAVED, WIFI_PASSWORD, WIFI_SAVED_DETAIL };
 uint8_t wifiView = WIFI_HOME;
 uint8_t wifiPage = 0;
@@ -243,7 +251,8 @@ enum : uint8_t {
   SCR_STARTER = 0, SCR_REGION, SCR_GALLERY, SCR_DEXPICK, SCR_MOVEPICK, SCR_BOX,
   SCR_PARTY, SCR_KEYBOARD, SCR_CARD, SCR_PLAYER, SCR_CLOCK, SCR_GYM, SCR_GYMPICK,
   SCR_EXPLORE, SCR_MART, SCR_LAN, SCR_PICK, SCR_BATTLE, SCR_WIN, SCR_LEARN, SCR_TRAIN, SCR_MENU,
-  SCR_BAGSCR, SCR_GAME, SCR_MAIN, SCR_SETTINGS, SCR_WIFI, SCR_WIFIPASS, SCR_COUNT
+  SCR_BAGSCR, SCR_GAME, SCR_MAIN, SCR_SETTINGS, SCR_WIFI, SCR_WIFIPASS,
+  SCR_FRIENDS, SCR_COUNT
 };
 extern const char *const SCREEN_NAME[SCR_COUNT];   // const is internal linkage in C++
 
@@ -288,6 +297,10 @@ void renderWifi();
 void wifiTap(int16_t x, int16_t y);
 uint8_t wifiPages();
 void wifiBack();
+void openKeyboardFor(uint8_t target);
+void renderFriends();
+void friendsTap(int16_t x, int16_t y);
+void friendsBack();
 bool startWildBattle(uint8_t region, bool hard);
 PartyMon wildToPartyMon();
 void focusSwap(uint8_t slot);
@@ -298,7 +311,7 @@ const char *const SCREEN_NAME[SCR_COUNT] = {
   "starter", "region", "gallery", "dexpick", "movepick", "box",
   "party", "keyboard", "card", "player", "clock", "gym", "gympick",
   "explore", "mart", "lan", "pick", "battle", "win", "learn", "train", "menu",
-  "bag", "minigame", "main", "settings", "wifi", "wifi-password"
+  "bag", "minigame", "main", "settings", "wifi", "wifi-password", "friends"
 };
 
 // Badge art for a region, or nullptr when that region has none yet.
@@ -1610,6 +1623,7 @@ void onSwipeV(int dir) {
   const bool back = dir > 0;
 
   if (wifiOpen) { if (back) wifiBack(); return; }
+  if (friendsOpen) { if (back) friendsBack(); return; }
   if (clockOpen) { if (back) clockOpen = false; return; }
   if (settingsOpen) { if (back) settingsOpen = false; return; }
 
@@ -2024,7 +2038,7 @@ void onSwipe(int dir) {
   if (pet.awaitingStarter()) { rpickSwipe(dir); return; }
   if (menuOpen) { menuOpen = false; return; }   // any swipe closes the menu
   if (battleOpen) return;   // no swiping out of a fight
-  if (wifiOpen || settingsOpen) return; // settings are modal, swipe down to go back
+  if (wifiOpen || settingsOpen || friendsOpen) return; // child screens use back
 
   int t = uiTileIndex();
   if (t >= 0) {
@@ -2069,6 +2083,13 @@ void onTap(int16_t x, int16_t y) {
       int ry = STARTER_ROW_Y + i * (STARTER_ROW_H + STARTER_ROW_GAP);
       if (x >= 70 && x <= 396 && y >= ry && y <= ry + STARTER_ROW_H) {
         pet.chooseStarter(starterOf(pet.region, (uint8_t)i));
+        // Every new adventure (including after a full pet WIPE) now asks for
+        // the trainer's name before the player can enter the regular game.
+        // Existing saves never hit this branch, so they keep their name.
+        openKeyboardFor(KB_TRAINER);
+        kbOnboarding = true;
+        nameBuf[0] = 0;
+        nameLen = 0;
         sfxPlay(SFX_TAP);
         break;
       }
@@ -2079,6 +2100,10 @@ void onTap(int16_t x, int16_t y) {
     battleTap(x, y);
     return;
   }
+  // A keyboard can be layered over the Player card; it must receive taps
+  // before the card underneath or renaming a trainer is impossible.
+  if (kbOpen) { keyboardTap(x, y); return; }
+  if (friendsOpen) { friendsTap(x, y); return; }
   if (wifiOpen) { wifiTap(x, y); return; }
   if (clockOpen) { clockTap(x, y); return; }
   if (settingsOpen) { settingsHubTap(x, y); return; }
@@ -2122,6 +2147,13 @@ void onTap(int16_t x, int16_t y) {
     if (playerPage == 0 && x > CX - 40 && x < CX + 40 && y > 70 && y < 146) {
       pet.avatar = (uint8_t)((pet.avatar + 1) % AVATAR_COUNT);
       pet.saveNow();
+      sfxPlay(SFX_TAP);
+      return;
+    }
+    if (playerPage == 0 && x >= 118 && x <= 348 && y >= 358 && y <= 403) {
+      friendsOpen = true;
+      friendsView = FRIEND_HOME;
+      friendMessage[0] = 0;
       sfxPlay(SFX_TAP);
       return;
     }
@@ -2289,10 +2321,6 @@ void onTap(int16_t x, int16_t y) {
       return;
     }
     galleryTap(x, y);
-    return;
-  }
-  if (kbOpen) {
-    keyboardTap(x, y);
     return;
   }
   if (pet.ceremony) return;  // durante la despedida no hay botones
@@ -2579,6 +2607,7 @@ uint8_t uiCurrentScreen() {
   if (bagOpen) return SCR_BAGSCR;
   if (kbOpen) return SCR_KEYBOARD;
   if (cardOpen) return SCR_CARD;
+  if (friendsOpen) return SCR_FRIENDS;
   if (playerOpen) return SCR_PLAYER;
   if (clockOpen) return SCR_CLOCK;
   if (wifiOpen) return wifiView == WIFI_PASSWORD ? SCR_WIFIPASS : SCR_WIFI;
@@ -2981,6 +3010,10 @@ void render() {
   }
   if (kbOpen) {
     renderKeyboard();
+    return;
+  }
+  if (friendsOpen) {
+    renderFriends();
     return;
   }
   if (clockOpen) {
@@ -3708,6 +3741,7 @@ void clockTap(int16_t x, int16_t y) {
 // On-device Wi-Fi screens are kept separate from pet gameplay. They are
 // included here because the canvas/palette/touch helpers live in this sketch.
 #include "wifi_screens.inc"
+#include "friends_screens.inc"
 
 // llama + numero de racha arriba a la izquierda
 void drawStreakBadge() {
@@ -5281,6 +5315,14 @@ static void renderPlayerBadges() {
   snprintf(l, sizeof(l), T(S_PARTY_FMT), party.count());
   gfx->setCursor(CX - (int)strlen(l) * 6, 338);
   gfx->print(l);
+  if (playerBadgeRegion == 0) {
+    gfx->fillRoundRect(118, 358, 230, 45, 12, UI_BAR_OK);
+    gfx->drawRoundRect(118, 358, 230, 45, 12, UI_INK);
+    gfx->setTextColor(UI_WHITE);
+    gfx->setTextSize(2);
+    gfx->setCursor(CX - 7 * 6, 371);
+    gfx->print("FRIENDS");
+  }
 }
 
 // Page 2: the medals. They used to sit on the creature's card; they belong with
@@ -5325,7 +5367,7 @@ void renderPlayer() {
 
   gfx->setTextColor(UI_INK_SOFT);
   gfx->setTextSize(2);
-  gfx->setCursor(CX - strlen(T(S_BACK)) * 6, 392);
+  gfx->setCursor(CX - strlen(T(S_BACK)) * 6, playerPage == 0 ? 420 : 392);
   gfx->print(T(S_BACK));
   uiChrome();
   gfx->flush();
@@ -6995,6 +7037,7 @@ static const char KB_KEYS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ.-";  // 28 + DEL + OK 
 void openKeyboardFor(uint8_t target) {
   kbTarget = target;
   kbOpen = true;
+  kbOnboarding = false;
   const char *cur = (target == KB_TRAINER) ? pet.trainerName : pet.nick;
   strncpy(nameBuf, cur, sizeof(nameBuf) - 1);
   nameBuf[sizeof(nameBuf) - 1] = 0;
@@ -7007,8 +7050,16 @@ void renderKeyboard() {
   gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
   gfx->setTextColor(UI_INK);
   gfx->setTextSize(2);
-  gfx->setCursor(CX - strlen(T(S_NAME)) * 6, 56);
-  gfx->print(T(S_NAME));
+  const char *title = kbTarget == KB_TRAINER ? "TRAINER NAME" : T(S_NAME);
+  gfx->setCursor(CX - strlen(title) * 6, 56);
+  gfx->print(title);
+  if (kbOnboarding) {
+    const char *hint = "What's your name, Trainer?";
+    gfx->setTextColor(UI_INK_SOFT);
+    gfx->setTextSize(1);
+    gfx->setCursor(CX - strlen(hint) * 3, 73);
+    gfx->print(hint);
+  }
   // buffer actual
   gfx->fillRoundRect(83, 84, 300, 40, 8, UI_WHITE);
   gfx->drawRoundRect(83, 84, 300, 40, 8, UI_INK);
@@ -7043,9 +7094,11 @@ void keyboardTap(int16_t x, int16_t y) {
   if (i == 28) {  // borrar
     if (nameLen) nameBuf[--nameLen] = 0;
   } else if (i == 29) {  // OK
+    if (kbOnboarding && !nameLen) { sfxPlay(SFX_DENY); return; }
     if (kbTarget == KB_TRAINER) pet.renameTrainer(nameBuf);
     else pet.rename(nameBuf);
     kbOpen = false;
+    kbOnboarding = false;
   } else if (nameLen < sizeof(nameBuf) - 1) {
     nameBuf[nameLen++] = KB_KEYS[i];
     nameBuf[nameLen] = 0;

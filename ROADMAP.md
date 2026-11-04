@@ -13,10 +13,11 @@
 
 ## Phase 2: Player profiles and friends
 
-- [ ] Offer trainer naming after first starter choice; never block offline pet gameplay.
+- [x] Prompt for trainer name after first starter choice, including after a pet factory wipe; offline play still works.
 - [ ] Register a named player silently when they first connect to the TamaToys API.
 - [ ] Create a server-unique, permanent friend code and a separate secret device token.
-- [ ] Friends menu on the Player screen: show own code, enter a code, send/accept/decline requests, remove friends.
+- [x] Friends menu interface on Player screen: pending code, code-entry keyboard, lists, request and removal-confirmation screens; emulator-only demo interactions.
+- [ ] Wire those interfaces to the real authenticated API (requests, codes, last-seen and challenges).
 - [ ] Friends-only last-seen information; allow players to opt out.
 - [ ] Keep online identity separate from local Pokemon/game resets; provide account recovery.
 
