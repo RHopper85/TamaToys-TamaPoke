@@ -38,6 +38,7 @@
 #include "nvsinfo.h"
 #include "i18n.h"
 #include "audio.h"
+#include "netwifi.h"
 
 // Version del firmware. Subir este numero en cada release (y manifest.json para
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
@@ -168,6 +169,19 @@ char partyBannerName[14] = "";
 
 bool clockOpen = false;       // pantalla de ajuste de hora (deslizar abajo)
 int clockH = 12, clockM = 0;  // hora en edicion
+bool settingsOpen = false;    // settings hub (time/sound and wireless)
+bool wifiOpen = false;
+enum : uint8_t { WIFI_HOME, WIFI_NEARBY, WIFI_SAVED, WIFI_PASSWORD, WIFI_SAVED_DETAIL };
+uint8_t wifiView = WIFI_HOME;
+uint8_t wifiPage = 0;
+char wifiSelectedSsid[33] = "";
+char wifiPassword[65] = "";
+uint8_t wifiPassLen = 0;
+uint8_t wifiKeyPage = 0;
+bool wifiShowPassword = false;
+bool wifiForgetConfirm = false;
+char wifiMessage[48] = "";
+uint32_t wifiMessageUntil = 0;
 
 // escena de bano: espuma sobre el bicho y limpieza al reventar
 uint32_t bathUntil = 0;
@@ -229,7 +243,7 @@ enum : uint8_t {
   SCR_STARTER = 0, SCR_REGION, SCR_GALLERY, SCR_DEXPICK, SCR_MOVEPICK, SCR_BOX,
   SCR_PARTY, SCR_KEYBOARD, SCR_CARD, SCR_PLAYER, SCR_CLOCK, SCR_GYM, SCR_GYMPICK,
   SCR_EXPLORE, SCR_MART, SCR_LAN, SCR_PICK, SCR_BATTLE, SCR_WIN, SCR_LEARN, SCR_TRAIN, SCR_MENU,
-  SCR_BAGSCR, SCR_GAME, SCR_MAIN, SCR_COUNT
+  SCR_BAGSCR, SCR_GAME, SCR_MAIN, SCR_SETTINGS, SCR_WIFI, SCR_WIFIPASS, SCR_COUNT
 };
 extern const char *const SCREEN_NAME[SCR_COUNT];   // const is internal linkage in C++
 
@@ -268,6 +282,12 @@ uint8_t bagPages();
 void renderMart();
 void martTap(int16_t x, int16_t y);
 uint8_t martPages();
+void renderSettingsHub();
+void settingsHubTap(int16_t x, int16_t y);
+void renderWifi();
+void wifiTap(int16_t x, int16_t y);
+uint8_t wifiPages();
+void wifiBack();
 bool startWildBattle(uint8_t region, bool hard);
 PartyMon wildToPartyMon();
 void focusSwap(uint8_t slot);
@@ -278,7 +298,7 @@ const char *const SCREEN_NAME[SCR_COUNT] = {
   "starter", "region", "gallery", "dexpick", "movepick", "box",
   "party", "keyboard", "card", "player", "clock", "gym", "gympick",
   "explore", "mart", "lan", "pick", "battle", "win", "learn", "train", "menu",
-  "bag", "minigame", "main"
+  "bag", "minigame", "main", "settings", "wifi", "wifi-password"
 };
 
 // Badge art for a region, or nullptr when that region has none yet.
@@ -937,6 +957,7 @@ void setup() {
   party.begin();
   bag.begin();
   pet.begin();
+  TamaWifi::begin();
   sdBegin();
   thumbs.load();
 
@@ -989,6 +1010,7 @@ void ensureMon() {
 void loop() {
   uint32_t now = millis();
   pet.update(now);
+  TamaWifi::poll();
 
   // The link is pumped here rather than from the LAN screen, because it has to
   // keep running through the battle too: linkNowPoll() drains what the radio
@@ -1587,6 +1609,10 @@ void onSwipeV(int dir) {
   if (battleOpen) return;   // no swiping out of a fight
   const bool back = dir > 0;
 
+  if (wifiOpen) { if (back) wifiBack(); return; }
+  if (clockOpen) { if (back) clockOpen = false; return; }
+  if (settingsOpen) { if (back) settingsOpen = false; return; }
+
   // Modals and sheets: down backs out, up has nowhere deeper to go.
   if (pickOpen)     { if (back) pickOpen = false; return; }
   if (lanOpen)      { if (back) { lanLeave(); lanOpen = false; } return; }
@@ -1601,7 +1627,6 @@ void onSwipeV(int dir) {
   if (sackOpen) { leaveSack(); return; }
   if (spdOpen)  { leaveSpeed(); return; }
   if (kbOpen || pet.ceremony) return;
-  if (clockOpen) { if (back) clockOpen = false; return; }
 
   if (exploreOpen) { if (back) uiTileGo(TILE_PET); return; }
   if (martOpen) {
@@ -1999,6 +2024,7 @@ void onSwipe(int dir) {
   if (pet.awaitingStarter()) { rpickSwipe(dir); return; }
   if (menuOpen) { menuOpen = false; return; }   // any swipe closes the menu
   if (battleOpen) return;   // no swiping out of a fight
+  if (wifiOpen || settingsOpen) return; // settings are modal, swipe down to go back
 
   int t = uiTileIndex();
   if (t >= 0) {
@@ -2053,6 +2079,9 @@ void onTap(int16_t x, int16_t y) {
     battleTap(x, y);
     return;
   }
+  if (wifiOpen) { wifiTap(x, y); return; }
+  if (clockOpen) { clockTap(x, y); return; }
+  if (settingsOpen) { settingsHubTap(x, y); return; }
   if (exploreOpen) {
     int8_t regionStep = exploreRegionHit(x, y);
     if (regionStep) {
@@ -2209,7 +2238,7 @@ void onTap(int16_t x, int16_t y) {
       if (i == 0) { cardOpen = true; cardPage = 1; }   // straight to the stats page
       else if (i == 1) { bagOpen = true; bagPage = 0; }
       else if (i == 2) { galleryOpen = true; galleryPick = true; galleryPage = 0; rpickPage = 0; galleryDetail = 0; galleryDirty = true; }
-      else if (i == 3) { openClock(); }
+      else if (i == 3) { settingsOpen = true; }
       else if (i == 4) {
         if (!pet.canRetireNow()) { sfxPlay(SFX_DENY); return; }
         choiceKind = 3; choiceUntil = millis() + 12000;
@@ -2264,10 +2293,6 @@ void onTap(int16_t x, int16_t y) {
   }
   if (kbOpen) {
     keyboardTap(x, y);
-    return;
-  }
-  if (clockOpen) {
-    clockTap(x, y);
     return;
   }
   if (pet.ceremony) return;  // durante la despedida no hay botones
@@ -2556,6 +2581,8 @@ uint8_t uiCurrentScreen() {
   if (cardOpen) return SCR_CARD;
   if (playerOpen) return SCR_PLAYER;
   if (clockOpen) return SCR_CLOCK;
+  if (wifiOpen) return wifiView == WIFI_PASSWORD ? SCR_WIFIPASS : SCR_WIFI;
+  if (settingsOpen) return SCR_SETTINGS;
   if (btlWinUntil) return SCR_WIN;
   if (battleOpen) return SCR_BATTLE;
   if (pickOpen) return SCR_PICK;
@@ -2665,6 +2692,12 @@ static uint8_t *uiRimTarget(uint8_t *pages) {
       n = k ? (uint8_t)((k + MOVE_PICK_PER_PAGE - 1) / MOVE_PICK_PER_PAGE) : 1;
       break;
     }
+    case SCR_WIFI:
+      if (wifiView == WIFI_NEARBY || wifiView == WIFI_SAVED) {
+        p = &wifiPage;
+        n = wifiPages();
+      }
+      break;
     case SCR_PICK: {
       uint8_t k = pickCandidates();
       p = &pickPage;
@@ -2952,6 +2985,14 @@ void render() {
   }
   if (clockOpen) {
     renderClock();
+    return;
+  }
+  if (wifiOpen) {
+    renderWifi();
+    return;
+  }
+  if (settingsOpen) {
+    renderSettingsHub();
     return;
   }
   if (battleOpen) {
@@ -3663,6 +3704,10 @@ void clockTap(int16_t x, int16_t y) {
   }
   if (y >= 340 && y <= 388 && x >= 133 && x <= 333) { applyClock(); return; }
 }
+
+// On-device Wi-Fi screens are kept separate from pet gameplay. They are
+// included here because the canvas/palette/touch helpers live in this sketch.
+#include "wifi_screens.inc"
 
 // llama + numero de racha arriba a la izquierda
 void drawStreakBadge() {
@@ -5697,6 +5742,7 @@ void renderLan() {
 void lanLeave() {
   if (lan.live()) lan.sendBye();
   linkNowEnd();
+  TamaWifi::resumeAfterLan();
   lan.state = LINK_OFF;
 }
 
@@ -5712,8 +5758,10 @@ static void lanOffer(bool host) {
     linkMonFrom(m, btlSquad[i]);
     lan.addMon(m);
   }
+  TamaWifi::suspendForLan();
   if (!linkNowBegin(&lan)) {          // no radio: say so rather than hanging
     lan.state = LINK_REFUSED;
+    TamaWifi::resumeAfterLan();
     return;
   }
   // BOTH sides announce. Which of them ends up hosting is settled by id inside

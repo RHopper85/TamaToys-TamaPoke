@@ -33,6 +33,12 @@ and complete them all (shinies included).
 
 ## Status
 
+### TamaToys development branch
+
+The `dev` branch of [RHopper85/TamaToys-TamaPoke](https://github.com/RHopper85/TamaToys-TamaPoke) adds an on-device Settings hub and Wi-Fi configuration UI. The Wi-Fi manager supports nearby-network scanning, saved networks, auto-connect and a case-sensitive password keyboard. Credentials are saved separately from pet progress. LAN battles retain ownership of the radio while active.
+
+The desktop emulator displays **simulated** Wi-Fi networks for testing UI navigation. It does not connect to the PC's real Wi-Fi network. Connection/reconnect behavior on Waveshare hardware is pending verification. Player registration, friend codes and asynchronous WAN battles are planned, not yet active. See [ROADMAP.md](ROADMAP.md).
+
 Running on hardware. Implemented: 1025 species + shinies animated from microSD, full
 life cycle (egg by rarity → evolution → farewell/release/runaway, each gated
 behind a decision dialog), bred-Pokédex with gallery, turn-based trainer, wild
