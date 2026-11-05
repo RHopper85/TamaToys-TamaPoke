@@ -64,8 +64,9 @@ static void friendPageFrame(const char *title) {
 static void friendPageHome() {
   friendPageFrame("FRIENDS");
   wifiLabel("YOUR FRIEND CODE", 87, 2, UI_INK_SOFT);
-  wifiLabel("NOT ASSIGNED", 119, 3);
-  wifiLabel("Online registration coming soon", 154, 1, UI_INK_SOFT);
+  wifiLabel(TamaOnline::registered() ? TamaOnline::friendCode() : "NOT ASSIGNED", 119, 3);
+  wifiLabel(TamaOnline::registered() ? "Your trainer account is saved" :
+            TamaOnline::status(), 154, 1, UI_INK_SOFT);
   wifiButton(89, 188, 288, 51, "FRIENDS LIST");
   wifiButton(89, 250, 288, 51, "ADD FRIEND");
   char requests[28];

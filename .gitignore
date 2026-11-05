@@ -16,6 +16,7 @@ tools/pmd_cache/
 tools/pokeapi_cache/
 
 reference.txt
+server/_private/config.php
 
 # The sprite bundles ARE committed, and that is deliberate. They have to be
 # served same-origin from GitHub Pages: release assets send no CORS headers at

@@ -35,7 +35,24 @@ volatile int g_touchX = 0, g_touchY = 0;
 volatile bool g_touchDown = false;
 
 // millis() lives in clock.cpp so the headless tests share it
-void FakeESP::restart() { Serial.println("emu: ESP.restart() -> exiting"); exit(0); }
+static char **g_argv = nullptr;
+static std::vector<char *> g_restartArgv;
+static const char *g_activeSaveFile = "tamapoke.nvs";
+
+void FakeESP::restart() {
+  // On real hardware Preferences commits immediately, but the emulator keeps
+  // NVS in RAM until its normal window-close path. Save the cleared NVS before
+  // replacing this process or a confirmed New Game would re-open the old save.
+  nvsSave(g_activeSaveFile);
+  Serial.println("emu: ESP.restart() -> saved state, restarting");
+  fflush(stdout);
+#ifndef _WIN32
+  execv("/proc/self/exe", g_argv); // Linux
+#endif
+  execv(g_argv[0], g_argv);       // Windows / macOS fallback
+  perror("emu: restart failed (save was written)");
+  exit(1);
+}
 
 // --- stdin-backed serial ---
 static std::deque<std::string> g_lines;
@@ -91,7 +108,6 @@ static void pumpStdin() {
 static std::string g_crashFile;
 void emuSetResetReason(int r);
 extern uint32_t gCrumbMagic, gCrumbScreen, gCrumbHeap;
-static char **g_argv = nullptr;
 
 static void crashArmAndReexec(int reason) {
   FILE *f = fopen(g_crashFile.c_str(), "wb");
@@ -444,8 +460,8 @@ static int shotMode(const char *screen, const char *out, int lvl, int iv, int de
 
 int main(int argc, char **argv) {
   int scale = 2;
-  g_argv = argv;
   const char *save = "tamapoke.nvs";
+  bool wipeRequested = false;
   const char *shot = nullptr, *shotOut = "shot.ppm";
   const char *wav = nullptr, *demo = nullptr;
   int shotLvl = 0, shotIv = -1, shotDex = 6;
@@ -461,8 +477,16 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--iv") && i + 1 < argc) shotIv = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--dex") && i + 1 < argc) shotDex = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--sprites") && i + 1 < argc) emuSetSpriteDir(argv[++i]);
-    else if (!strcmp(argv[i], "--wipe")) { remove(save); }
+    else if (!strcmp(argv[i], "--wipe")) wipeRequested = true;
   }
+  if (wipeRequested) remove(save);
+  g_activeSaveFile = save;
+  // --wipe applies ONLY to the initial launch; passing it through an exec
+  // would erase the freshly reset/restarted game a second time.
+  for (int i = 0; i < argc; ++i)
+    if (strcmp(argv[i], "--wipe") != 0) g_restartArgv.push_back(argv[i]);
+  g_restartArgv.push_back(nullptr);
+  g_argv = g_restartArgv.data();
   // Audio preview: no SDL, no board -- just a file you can listen to.
   if (wav) return wavMain(wav, demo);
   if (shot) return shotMode(shot, shotOut, shotLvl, shotIv, shotDex);   // headless: no SDL at all

@@ -47,4 +47,7 @@ bool connect(const char *ssid, const char *password = nullptr);
 void suspendForLan();
 void resumeAfterLan();
 
+// Clear Wi-Fi credentials/options only for a confirmed factory reset.
+bool clearAll();
+
 }  // namespace TamaWifi

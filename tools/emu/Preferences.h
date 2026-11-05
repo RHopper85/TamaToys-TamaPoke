@@ -25,20 +25,34 @@ void nvsSave(const char *path);
 class Preferences {
 public:
   NvsStore &kv = nvs();
-  bool begin(const char *, bool = false) { return true; }
+  // Legacy pet keys remain unprefixed for old emulator saves and tests.
+  // Device identity lives in its own namespace, just like real ESP32 NVS.
+  std::string prefix;
+  bool begin(const char *name, bool = false) {
+    prefix = name && strcmp(name, "tt_online") == 0 ? "tt_online/" : "";
+    return true;
+  }
   void end() {}
-  void clear() { kv.clear(); }
-  bool isKey(const char *k) { return kv.count(k) != 0; }
+  bool clear() {
+    for (auto it = kv.begin(); it != kv.end();) {
+      bool owned = prefix.empty() ? it->first.find('/') == std::string::npos
+                                  : it->first.find(prefix) == 0;
+      if (owned) it = kv.erase(it);
+      else ++it;
+    }
+    return true;
+  }
+  bool isKey(const char *k) { return kv.count(prefix + k) != 0; }
 
   template <typename T> size_t putT(const char *k, T v) {
     if (!nvsCanWrite()) return 0;
     std::vector<uint8_t> b(sizeof(T));
     memcpy(b.data(), &v, sizeof(T));
-    kv[k] = b;
+    kv[prefix + k] = b;
     return sizeof(T);
   }
   template <typename T> T getT(const char *k, T d) {
-    auto it = kv.find(k);
+    auto it = kv.find(prefix + k);
     if (it == kv.end() || it->second.size() != sizeof(T)) return d;
     T v; memcpy(&v, it->second.data(), sizeof(T)); return v;
   }
@@ -57,13 +71,13 @@ public:
   size_t putBytes(const char *k, const void *p, size_t n) {
     if (!nvsCanWrite()) return 0;
     const uint8_t *b = (const uint8_t *)p;
-    kv[k] = std::vector<uint8_t>(b, b + n);
+    kv[prefix + k] = std::vector<uint8_t>(b, b + n);
     return n;
   }
   // Size of a stored blob, 0 if absent. The firmware uses it to tell an
   // old, shorter record layout from the current one (see Party::begin).
   size_t getBytesLength(const char *k) {
-    auto it = kv.find(k);
+    auto it = kv.find(prefix + k);
     return it == kv.end() ? 0 : it->second.size();
   }
   // MATCHES THE HARDWARE, which is not the obvious behaviour. Arduino's
@@ -78,7 +92,7 @@ public:
   // the badge arrays and eggByRegion at their zero initialiser on a real board,
   // while every test on this stub happily read a sane prefix and passed.
   size_t getBytes(const char *k, void *p, size_t n) {
-    auto it = kv.find(k);
+    auto it = kv.find(prefix + k);
     if (it == kv.end()) return 0;
     if (it->second.size() > n) return 0;      // hardware copies nothing here
     memcpy(p, it->second.data(), it->second.size());
@@ -86,15 +100,17 @@ public:
   }
   size_t putString(const char *k, const char *v) {
     if (!nvsCanWrite()) return 0;
-    kv[k] = std::vector<uint8_t>(v, v + strlen(v) + 1);
+    kv[prefix + k] = std::vector<uint8_t>(v, v + strlen(v) + 1);
     return strlen(v) + 1;
   }
   size_t getString(const char *k, char *out, size_t n) {
-    auto it = kv.find(k);
+    auto it = kv.find(prefix + k);
     if (it == kv.end()) { if (n) out[0] = 0; return 0; }
-    size_t c = it->second.size() < n ? it->second.size() : n - 1;
-    memcpy(out, it->second.data(), c);
-    out[c ? c - 1 : 0] = 0;
-    return c;
+    if (!n) return 0;
+    size_t count = it->second.empty() ? 0 : it->second.size() - 1;
+    if (count >= n) count = n - 1;
+    if (count) memcpy(out, it->second.data(), count);
+    out[count] = 0;
+    return count;
   }
 };

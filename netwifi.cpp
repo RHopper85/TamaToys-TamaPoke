@@ -299,6 +299,26 @@ void resumeAfterLan() {
   nextAutoScan = millis() + 3000;
 }
 
+bool clearAll() {
+  Preferences prefs;
+  if (!prefs.begin("tt_wifi", false)) return false;
+  bool cleared = prefs.clear();
+  prefs.end();
+  if (!cleared) return false;
+  for (auto &entry : saved) entry = SavedNetwork();
+  visibleCount = 0;
+  scanRunning = connectRunning = autoScan = false;
+  pendingPassword[0] = pendingSsid[0] = activeSsid[0] = '\0';
+  masterOn = false;
+  reconnectOn = true;
+  lanOwnsRadio = false;
+  WiFi.scanDelete();
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_OFF);
+  current = State::OFF;
+  return true;
+}
+
 }  // namespace TamaWifi
 
 #else  // Desktop emulator: demonstrate menus without using the PC's real Wi-Fi.
@@ -376,6 +396,14 @@ bool connect(const char *ssid, const char *password) {
 }
 void suspendForLan() { lanOwnsRadio = true; linked = false; current = State::LAN; }
 void resumeAfterLan() { lanOwnsRadio = false; current = masterOn ? State::IDLE : State::OFF; }
+bool clearAll() {
+  masterOn = false;
+  reconnectOn = true;
+  lanOwnsRadio = linked = scanDone = false;
+  remembered[0] = activeSsid[0] = '\0';
+  current = State::OFF;
+  return true;
+}
 }  // namespace TamaWifi
 
 #endif

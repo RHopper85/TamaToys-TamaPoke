@@ -46,7 +46,7 @@ int main() {
   onTap(233, uiMenuRowCenterY(3));
   expect(settingsOpen, "Settings menu opens a hub");
   checkFrame("Settings hub renders");
-  onTap(233, 248);
+  onTap(233, 193); // Wi-Fi row moved up to make room for reset options
   expect(wifiOpen, "Wi-Fi opens from Settings");
   checkFrame("Wi-Fi home renders");
 

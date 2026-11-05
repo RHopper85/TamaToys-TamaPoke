@@ -49,26 +49,127 @@ static void wifiNotice(const char *msg) {
   wifiMessageUntil = millis() + 4000;
 }
 
+// Both reset paths block the shutdown handler from restoring the old creature
+// after NVS has been erased. New Game deliberately keeps Wi-Fi and tt_online.
+bool startNewGame() {
+  if (!TamaOnline::rememberName(pet.trainerName[0] ? pet.trainerName : "TRAINER"))
+    return false;
+  if (!pet.factoryReset()) return false;
+  saveInhibited = true;
+  delay(100);
+  ESP.restart();
+  return true; // only reached by an emulator/test restart stub
+}
+
+TamaOnline::DeleteResult startFactoryReset() {
+  TamaOnline::DeleteResult deleted = TamaOnline::deleteAccount();
+  if (deleted != TamaOnline::DeleteResult::DELETED &&
+      deleted != TamaOnline::DeleteResult::NO_ACCOUNT) return deleted;
+  // Server deletion is already complete (or no account ever existed).
+  // Only now erase local identity, saved networks and the entire game save.
+  if (!TamaOnline::clearIdentity() || !TamaWifi::clearAll() || !pet.factoryReset())
+    return TamaOnline::DeleteResult::STORAGE_ERROR;
+  saveInhibited = true;
+  delay(100);
+  ESP.restart();
+  return deleted;
+}
+
+static void renderResetConfirm() {
+  const bool factory = resetView == RESET_FACTORY;
+  wifiFrame(resetView == RESET_FAILED ? "RESET FAILED" :
+            factory ? "FACTORY RESET?" : "NEW GAME?");
+  if (resetView == RESET_FAILED) {
+    wifiLabel(resetMessage, 177, 1, UI_BAR_BAD);
+    wifiLabel("Your game was not restarted", 214, 1, UI_INK_SOFT);
+    wifiButton(112, 301, 242, 54, "BACK");
+    gfx->flush();
+    return;
+  }
+  wifiLabel("THIS CANNOT BE UNDONE", 112, 2, UI_BAR_BAD);
+  if (factory) {
+    wifiLabel("ERASE ALL GAME PROGRESS", 157, 2);
+    wifiLabel("Remove account and friends", 190, 1);
+    wifiLabel("Erase trainer + saved Wi-Fi", 211, 1);
+    wifiLabel(TamaOnline::hasToken() ?
+              (TamaWifi::state() == TamaWifi::State::CONNECTED ?
+                "Online deletion required" : "CONNECT WI-FI FIRST") :
+              "No online account on device", 245, 1, UI_BAR_BAD);
+  } else {
+    wifiLabel("ERASE ALL GAME PROGRESS", 157, 2);
+    wifiLabel("Keep trainer and friend code", 190, 1);
+    wifiLabel("Keep friends and saved Wi-Fi", 211, 1);
+    wifiLabel("Choose a new starter afterward", 245, 1, UI_INK_SOFT);
+  }
+  wifiButton(93, 288, 130, 57, "NO", true);
+  wifiButton(243, 288, 130, 57, "YES");
+  wifiLabel("Please confirm", 375, 1, UI_INK_SOFT);
+  gfx->flush();
+}
+
 void renderSettingsHub() {
+  if (resetView != RESET_NONE) { renderResetConfirm(); return; }
   wifiFrame("SETTINGS");
-  wifiLabel("Device options", 99, 2, UI_INK_SOFT);
-  wifiButton(89, 142, 288, 62, "TIME / SOUND");
-  wifiButton(89, 218, 288, 62, "WI-FI");
-  wifiButton(89, 294, 288, 62, "BACK");
-  wifiLabel("TamaToys", 409, 2, UI_INK_SOFT);
+  wifiLabel("Device options", 87, 2, UI_INK_SOFT);
+  wifiButton(99, 111, 268, 49, "TIME / SOUND");
+  wifiButton(99, 169, 268, 49, "WI-FI");
+  wifiButton(99, 227, 268, 49, "NEW GAME");
+  wifiButton(99, 285, 268, 49, "FACTORY RESET");
+  wifiLabel("Reset options erase progress", 352, 1, UI_BAR_BAD);
+  wifiButton(132, 393, 202, 34, "BACK");
   gfx->flush();
 }
 
 void settingsHubTap(int16_t x, int16_t y) {
-  if (wifiHit(x, y, 89, 142, 288, 62)) {
+  if (resetView != RESET_NONE) {
+    if (resetView == RESET_FAILED) {
+      if (wifiHit(x, y, 112, 301, 242, 54)) resetView = RESET_NONE;
+      return;
+    }
+    if (wifiHit(x, y, 93, 288, 130, 57)) {
+      resetView = RESET_NONE;
+      sfxPlay(SFX_TAP);
+    } else if (wifiHit(x, y, 243, 288, 130, 57)) {
+      if (resetView == RESET_NEW_GAME) {
+        if (!startNewGame()) {
+          strcpy(resetMessage, "Could not erase game save");
+          resetView = RESET_FAILED;
+          sfxPlay(SFX_DENY);
+        }
+      } else {
+        wifiFrame("FACTORY RESET");
+        wifiLabel("Removing online account...", 198, 1);
+        gfx->flush();
+        TamaOnline::DeleteResult outcome = startFactoryReset();
+        switch (outcome) {
+          case TamaOnline::DeleteResult::WIFI_REQUIRED:
+            strcpy(resetMessage, "Connect to Wi-Fi and retry"); break;
+          case TamaOnline::DeleteResult::STORAGE_ERROR:
+            strcpy(resetMessage, "NVS erase failed. Retry reset"); break;
+          default:
+            strcpy(resetMessage, "Server deletion failed. Retry"); break;
+        }
+        resetView = RESET_FAILED;
+        sfxPlay(SFX_DENY);
+      }
+    }
+    return;
+  }
+  if (wifiHit(x, y, 99, 111, 268, 49)) {
     openClock();
     sfxPlay(SFX_TAP);
-  } else if (wifiHit(x, y, 89, 218, 288, 62)) {
+  } else if (wifiHit(x, y, 99, 169, 268, 49)) {
     wifiOpen = true;
     wifiView = WIFI_HOME;
     wifiPage = 0;
     sfxPlay(SFX_TAP);
-  } else if (wifiHit(x, y, 89, 294, 288, 62)) {
+  } else if (wifiHit(x, y, 99, 227, 268, 49)) {
+    resetView = RESET_NEW_GAME;
+    sfxPlay(SFX_TAP);
+  } else if (wifiHit(x, y, 99, 285, 268, 49)) {
+    resetView = RESET_FACTORY;
+    sfxPlay(SFX_TAP);
+  } else if (wifiHit(x, y, 132, 393, 202, 34)) {
     settingsOpen = false;
     sfxPlay(SFX_TAP);
   }

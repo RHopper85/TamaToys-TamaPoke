@@ -34,6 +34,8 @@ String FakeSerial::readStringUntil(char) { return String(""); }
 
 void setup();
 void loop();
+uint8_t uiCurrentScreen();
+extern const char *const SCREEN_NAME[];
 extern Pet pet;   // defined in the sketch
 extern bool trainOpen, sackOpen, gameOpen, menuOpen, cardOpen, movePickOpen, spdOpen;
 extern bool bagOpen, playerOpen;
@@ -109,6 +111,20 @@ int main(int argc, char **argv) {
   if (pet.region != 0) { printf("FAIL: region tap did not land\n"); return 1; }
   if (!pet.awaitingStarter()) { printf("FAIL: the region tap chose a starter\n"); return 1; }
   printf("picked KANTO, still on the starter flow\n");
+
+  // The starter picker must offer a touchable way to switch regions before
+  // any Pokemon is chosen; going back never counts as a starter selection.
+  click(233, 390);
+  if (!pet.awaitingStarter() || strcmp(SCREEN_NAME[uiCurrentScreen()], "region")) {
+    printf("FAIL: starter Back did not return to the region chooser\n");
+    return 1;
+  }
+  click(233, 108 + 30); // return to Kanto, then keep the original tap test
+  if (strcmp(SCREEN_NAME[uiCurrentScreen()], "starter")) {
+    printf("FAIL: could not reenter starter picker after Back\n");
+    return 1;
+  }
+  printf("PASS: starter Back returns to region chooser and back again\n");
 
   // Negative control: below the three rows (they span y 110..344). If this
   // "selects" a starter the test proves nothing about coordinate routing.

@@ -2,6 +2,7 @@
 #include "Arduino.h"
 #include "Arduino_GFX_Library.h"
 #include "pet.h"
+#include "online_identity.h"
 #include <cstdio>
 #include <cstring>
 
@@ -18,13 +19,15 @@ String FakeSerial::readStringUntil(char) { return String(""); }
 extern Pet pet;
 extern Arduino_Canvas *gfx;
 extern bool kbOpen, kbOnboarding, playerOpen, friendsOpen;
-extern uint8_t playerPage, friendsView, friendPreviewCount;
+extern uint8_t playerPage, friendsView, friendPreviewCount, rpickPage;
+extern uint16_t gRegionArt;
 extern char friendCodeEntry[13];
 extern uint8_t friendCodeEntryLen;
 extern const char *const SCREEN_NAME[];
 void setup();
 void render();
 void onTap(int16_t x, int16_t y);
+void onSwipe(int dir);
 void onSwipeV(int dir);
 uint8_t uiCurrentScreen();
 
@@ -41,11 +44,44 @@ static void frame(const char *what) {
 
 int main() {
   setup();
+  gRegionArt = 0xFFFF; // test all region pages regardless of installed art packs
   expect(pet.awaitingStarter(), "clean save requires a starter");
   onTap(233, 140); // Kanto region
+  expect(!strcmp(SCREEN_NAME[uiCurrentScreen()], "starter"),
+         "region selection opens the starter chooser");
+  frame("starter chooser with Back button renders");
+  onTap(233, 390); // BACK, safely below every starter row
+  expect(pet.awaitingStarter() && rpickPage == 0 &&
+         !strcmp(SCREEN_NAME[uiCurrentScreen()], "region"),
+         "Back returns to the first region page without choosing a starter");
+
+  onSwipe(-1); // second region page
+  expect(rpickPage == 1, "region picker advances to page 2");
+  onTap(233, 140); // first region on page 2
+  expect(!strcmp(SCREEN_NAME[uiCurrentScreen()], "starter"),
+         "a region from page 2 opens its starters");
+  onTap(233, 390);
+  expect(rpickPage == 1 && !strcmp(SCREEN_NAME[uiCurrentScreen()], "region"),
+         "Back remembers region page 2");
+
+  onSwipe(-1); // third region page
+  expect(rpickPage == 2, "region picker advances to page 3");
+  onTap(233, 140); // first region on page 3
+  expect(!strcmp(SCREEN_NAME[uiCurrentScreen()], "starter"),
+         "a region from page 3 opens its starters");
+  onTap(233, 390);
+  expect(rpickPage == 2 && !strcmp(SCREEN_NAME[uiCurrentScreen()], "region"),
+         "Back remembers region page 3");
+
+  onSwipe(-1); // wraps back to first page
+  onTap(233, 210); // Johto, proving a different region is selectable
+  expect(pet.region == 1 && !strcmp(SCREEN_NAME[uiCurrentScreen()], "starter"),
+         "player can change region after going back");
   onTap(233, 140); // first starter
   expect(!pet.awaitingStarter(), "starter is chosen");
   expect(kbOpen && kbOnboarding, "mandatory trainer-name keyboard appears");
+  expect(TamaOnline::needsNameOnboarding(),
+         "onboarding remains pending if power is lost before name entry");
   frame("trainer onboarding renders");
 
   onTap(380, 379); // OK without a name
@@ -55,6 +91,7 @@ int main() {
   onTap(128, 174); // B
   onTap(380, 379); // OK
   expect(!kbOpen && !kbOnboarding, "trainer-name keyboard closes after naming");
+  expect(!TamaOnline::needsNameOnboarding(), "name confirmation clears reboot prompt");
   expect(!strcmp(pet.trainerName, "ROB"), "entered trainer name is saved");
 
   playerOpen = true;

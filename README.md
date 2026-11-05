@@ -35,9 +35,11 @@ and complete them all (shinies included).
 
 ### TamaToys development branch
 
-The `dev` branch of [RHopper85/TamaToys-TamaPoke](https://github.com/RHopper85/TamaToys-TamaPoke) adds an on-device Settings hub and Wi-Fi configuration UI. The Wi-Fi manager supports nearby-network scanning, saved networks, auto-connect and a case-sensitive password keyboard. Credentials are saved separately from pet progress. LAN battles retain ownership of the radio while active. After first-time starter selection (or a full pet wipe), players now choose a trainer name using the existing keyboard. Current saves retain their trainer names. The Player card also has a **Friends** button with list, code entry, requests and removal-confirmation screens.
+The `dev` branch of [RHopper85/TamaToys-TamaPoke](https://github.com/RHopper85/TamaToys-TamaPoke) adds an on-device Settings hub and Wi-Fi configuration UI. The Wi-Fi manager supports nearby-network scanning, saved networks, auto-connect and a case-sensitive password keyboard. Credentials are saved separately from pet progress. LAN battles retain ownership of the radio while active. Players name their trainer after the first starter choice. The Player card has a **Friends** button where a registered device displays its server-issued friend code.
 
-The desktop emulator displays **simulated** Wi-Fi networks for testing UI navigation. It does not connect to the PC's real Wi-Fi network. Its Friends screens likewise use labeled **temporary demo data only**; no friend is really contacted and no globally unique code is issued. Physical Wi-Fi still needs testing on Waveshare hardware. Server-backed player registration, permanent friend codes and asynchronous WAN battles are planned, not yet active. See [ROADMAP.md](ROADMAP.md).
+The desktop emulator displays **simulated** Wi-Fi networks for testing UI navigation. It does not connect to the PC's real Wi-Fi network or contact IONOS. Its Friends screens use labeled **temporary demo data only**. On real hardware, the first connected Wi-Fi session with a named trainer automatically registers a persistent token and friend code through the IONOS HTTPS API; this path needs hardware testing. Friend requests/list synchronization and asynchronous WAN battles are not wired up yet. See [ROADMAP.md](ROADMAP.md).
+
+**Settings reset options:** `NEW GAME` (No/Yes confirmation) clears game progress and reopens the starter chooser, preserving the trainer name, saved Wi-Fi, token/friend code and server friends. `FACTORY RESET` (No/Yes confirmation) erases everything. A device with an online token must be connected to Wi-Fi and receive successful account deletion from IONOS before local data is cleared; if deletion fails, the reset is cancelled. Devices with no online token can reset offline. The developer `WIPE` command now behaves like New Game.
 
 Running on hardware. Implemented: 1025 species + shinies animated from microSD, full
 life cycle (egg by rarity → evolution → farewell/release/runaway, each gated
@@ -726,7 +728,7 @@ beach, forest, volcano, mountain, snow). Sleeping forces night.
 `EGG <dex> [shiny]` (hatch a chosen species — the only way to test the
 legendary/shiny IV guarantees, which apply at hatch) ·
 `SHINY` · `NICK <x>` · `BYE` / `RUN` (farewell / runaway) · `ABANDON` (force the
-runaway-ready state) · `WIPE` (factory reset → new game) · `BEEP` (audio test) ·
+runaway-ready state) · `WIPE` (New Game; preserves trainer identity) · `BEEP` (audio test) ·
 `REG` (Pokédex) · `EGGS` (simulate 20 eggs) · `GAL` (gallery) · `CAREDAY` ·
 `PARTY` / `PARTY <dex>` / `PARTY CLEAR` (inspect and fill the party) ·
 `FOCUS <slot>` (swap the creature you are raising with a party slot) ·

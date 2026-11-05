@@ -39,6 +39,7 @@
 #include "i18n.h"
 #include "audio.h"
 #include "netwifi.h"
+#include "online_identity.h"
 
 // Version del firmware. Subir este numero en cada release (y manifest.json para
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
@@ -171,6 +172,9 @@ char partyBannerName[14] = "";
 bool clockOpen = false;       // pantalla de ajuste de hora (deslizar abajo)
 int clockH = 12, clockM = 0;  // hora en edicion
 bool settingsOpen = false;    // settings hub (time/sound and wireless)
+enum : uint8_t { RESET_NONE, RESET_NEW_GAME, RESET_FACTORY, RESET_FAILED };
+uint8_t resetView = RESET_NONE;
+char resetMessage[51] = "";
 bool wifiOpen = false;
 bool friendsOpen = false;     // child screen of the existing Player card
 enum : uint8_t { FRIEND_HOME, FRIEND_LIST, FRIEND_ADD, FRIEND_REQUESTS, FRIEND_DETAIL, FRIEND_REMOVE };
@@ -293,6 +297,8 @@ void martTap(int16_t x, int16_t y);
 uint8_t martPages();
 void renderSettingsHub();
 void settingsHubTap(int16_t x, int16_t y);
+bool startNewGame();
+TamaOnline::DeleteResult startFactoryReset();
 void renderWifi();
 void wifiTap(int16_t x, int16_t y);
 uint8_t wifiPages();
@@ -861,6 +867,12 @@ static bool starterRegionDone = false;
 #define STARTER_ROW_Y 110
 #define STARTER_ROW_H 70
 #define STARTER_ROW_GAP 8
+// A proper touch-sized way to reconsider the starting region without wiping.
+// All three starter rows end above y=344, leaving the lower bezel for BACK.
+#define STARTER_BACK_X 132
+#define STARTER_BACK_Y 365
+#define STARTER_BACK_W 202
+#define STARTER_BACK_H 50
 // boton-CTA de evolucion (centrado, mitad de pantalla)
 #define EVO_BTN_W 256
 #define EVO_BTN_H 64
@@ -971,6 +983,19 @@ void setup() {
   bag.begin();
   pet.begin();
   TamaWifi::begin();
+  TamaOnline::begin();
+  // A soft reset wipes the pet namespace but preserves the trainer in the
+  // separate identity namespace. The next starter inherits that same name.
+  if (pet.awaitingStarter() && TamaOnline::savedName()[0]) {
+    strncpy(pet.trainerName, TamaOnline::savedName(), sizeof(pet.trainerName) - 1);
+    pet.trainerName[sizeof(pet.trainerName) - 1] = 0;
+  }
+  if (!pet.awaitingStarter() && TamaOnline::needsNameOnboarding()) {
+    openKeyboardFor(KB_TRAINER);
+    kbOnboarding = true;
+    nameBuf[0] = 0;
+    nameLen = 0;
+  }
   sdBegin();
   thumbs.load();
 
@@ -1024,6 +1049,7 @@ void loop() {
   uint32_t now = millis();
   pet.update(now);
   TamaWifi::poll();
+  TamaOnline::poll(pet.trainerName, !pet.awaitingStarter() && !kbOnboarding);
 
   // The link is pumped here rather than from the LAN screen, because it has to
   // keep running through the battle too: linkNowPoll() drains what the radio
@@ -1434,14 +1460,9 @@ void handleSerial() {
     inN = 0;
     if (ok) { Serial.println("DONE"); delay(100); ESP.restart(); }
   } else if (line == "WIPE") {
-    pet.factoryReset();     // borra NVS y reinicia -> partida nueva (eleccion de inicial)
-    // Set BEFORE the restart, because the restart runs the shutdown handler, and
-    // that handler's whole job is to flush a pending save. Without this it would
-    // write the creature that was just deleted straight back into the empty NVS.
-    saveInhibited = true;
-    Serial.println("DONE");
-    delay(100);
-    ESP.restart();
+    // Developer WIPE follows NEW GAME semantics. A serial command must not
+    // orphan an online trainer or silently delete somebody's friends.
+    if (!startNewGame()) Serial.println("WIPE FAILED (NVS)");
   } else if (line.startsWith("PARTY")) {
     // PARTY          list the party
     // PARTY <dex>    bank a level-50 specimen (fills slots up for testing)
@@ -1625,7 +1646,13 @@ void onSwipeV(int dir) {
   if (wifiOpen) { if (back) wifiBack(); return; }
   if (friendsOpen) { if (back) friendsBack(); return; }
   if (clockOpen) { if (back) clockOpen = false; return; }
-  if (settingsOpen) { if (back) settingsOpen = false; return; }
+  if (settingsOpen) {
+    if (back) {
+      if (resetView != RESET_NONE) resetView = RESET_NONE;
+      else settingsOpen = false;
+    }
+    return;
+  }
 
   // Modals and sheets: down backs out, up has nowhere deeper to go.
   if (pickOpen)     { if (back) pickOpen = false; return; }
@@ -2083,16 +2110,25 @@ void onTap(int16_t x, int16_t y) {
       int ry = STARTER_ROW_Y + i * (STARTER_ROW_H + STARTER_ROW_GAP);
       if (x >= 70 && x <= 396 && y >= ry && y <= ry + STARTER_ROW_H) {
         pet.chooseStarter(starterOf(pet.region, (uint8_t)i));
-        // Every new adventure (including after a full pet WIPE) now asks for
-        // the trainer's name before the player can enter the regular game.
-        // Existing saves never hit this branch, so they keep their name.
-        openKeyboardFor(KB_TRAINER);
-        kbOnboarding = true;
-        nameBuf[0] = 0;
-        nameLen = 0;
+        // New Game retains the existing trainer identity/name; Factory Reset
+        // clears the online namespace and must prompt for a new name.
+        if (!TamaOnline::savedName()[0]) {
+          TamaOnline::setNameOnboarding(true);
+          openKeyboardFor(KB_TRAINER);
+          kbOnboarding = true;
+          nameBuf[0] = 0;
+          nameLen = 0;
+        }
         sfxPlay(SFX_TAP);
         break;
       }
+    }
+    if (x >= STARTER_BACK_X && x <= STARTER_BACK_X + STARTER_BACK_W &&
+        y >= STARTER_BACK_Y && y <= STARTER_BACK_Y + STARTER_BACK_H) {
+      starterRegionDone = false;
+      // Keep the chooser on the page that held this region. Players should
+      // not have to swipe back through the region list to change their mind.
+      sfxPlay(SFX_TAP);
     }
     return;
   }
@@ -2579,6 +2615,15 @@ void renderStarterSelect() {
     gfx->setCursor(178, ry + 24);
     gfx->print(de.name);
   }
+  gfx->fillRoundRect(STARTER_BACK_X, STARTER_BACK_Y,
+                     STARTER_BACK_W, STARTER_BACK_H, 13, UI_TRACK);
+  gfx->drawRoundRect(STARTER_BACK_X, STARTER_BACK_Y,
+                     STARTER_BACK_W, STARTER_BACK_H, 13, UI_INK);
+  const char *back = T(S_BACK);
+  gfx->setTextColor(UI_INK);
+  gfx->setTextSize(2);
+  gfx->setCursor(CX - (int)strlen(back) * 6, STARTER_BACK_Y + 17);
+  gfx->print(back);
   gfx->flush();
 }
 
@@ -7095,11 +7140,14 @@ void keyboardTap(int16_t x, int16_t y) {
     if (nameLen) nameBuf[--nameLen] = 0;
   } else if (i == 29) {  // OK
     if (kbOnboarding && !nameLen) { sfxPlay(SFX_DENY); return; }
-    if (kbTarget == KB_TRAINER) pet.renameTrainer(nameBuf);
+    if (kbTarget == KB_TRAINER) {
+      pet.renameTrainer(nameBuf);
+      if (kbOnboarding) TamaOnline::setNameOnboarding(false);
+    }
     else pet.rename(nameBuf);
     kbOpen = false;
     kbOnboarding = false;
-  } else if (nameLen < sizeof(nameBuf) - 1) {
+  } else if (nameLen < (kbTarget == KB_TRAINER ? 10 : sizeof(nameBuf) - 1)) {
     nameBuf[nameLen++] = KB_KEYS[i];
     nameBuf[nameLen] = 0;
   }

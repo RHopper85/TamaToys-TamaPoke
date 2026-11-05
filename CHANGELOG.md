@@ -2,8 +2,17 @@
 
 ## Unreleased (`dev`)
 
+### Online identity and reset controls
+
+- Added first Wi-Fi registration to the IONOS HTTPS API, with device-generated private token persisted before the request so network retries do not create duplicate accounts. The assigned friend code appears only inside Friends.
+- Added `NEW GAME` to Settings: confirmation erases local Pokemon, party/box, Dex, badges, items, currency and game progress, preserving the trainer name, token, friend code, server friendships and Wi-Fi profiles.
+- Added `FACTORY RESET` with a separate irreversible Yes/No warning. A registered device must connect to Wi-Fi and successfully delete its IONOS account before device data is wiped. Server deletion cascades to friend requests and friendships.
+- Added TLS root validation, network-time synchronization, a fail-closed deletion path and a headless reset UI regression test. Real hardware TLS and Wi-Fi testing is still required.
+- Changed serial `WIPE` to the safe New Game semantics so a debugging action cannot accidentally orphan an IONOS account.
+
 ### Trainer onboarding and Friends UI (Phase 2)
 
+- Added a Back button on the first-run starter-selection screen so players can change their starting region before choosing a Pokemon; returning preserves the current region-list page (including pages 2 and 3).
 - Added the missing mandatory trainer-name prompt immediately after choosing the first starter, including after a full pet wipe.
 - Reused the trainer-name keyboard and fixed player-card input routing so tapping the rename keyboard actually enters letters.
 - Added Friends on the Player card: code-pending home, friend list, details, friend-code entry, requests and removal confirmation.
@@ -24,4 +33,4 @@
 - Removed duplicate `z_battle.cpp` and corrected the release badge.
 - Verified the original ESP32-S3 firmware builds with appropriate flash/PSRAM/partition settings.
 
-No live API, friend-code registration or WAN battles have been implemented yet.
+IONOS registration and deletion are implemented. Friend request/list endpoints and WAN battles are not yet implemented.

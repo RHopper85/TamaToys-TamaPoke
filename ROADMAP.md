@@ -13,13 +13,15 @@
 
 ## Phase 2: Player profiles and friends
 
-- [x] Prompt for trainer name after first starter choice, including after a pet factory wipe; offline play still works.
-- [ ] Register a named player silently when they first connect to the TamaToys API.
-- [ ] Create a server-unique, permanent friend code and a separate secret device token.
+- [x] Prompt for trainer name after first starter choice or Factory Reset; New Game preserves the previous name.
+- [x] Implement automatic registration via HTTPS on first Wi-Fi connection (hardware test pending).
+- [x] Assign a server-unique friend code and a separate secret device token; store token only on device and hashed on server.
 - [x] Friends menu interface on Player screen: pending code, code-entry keyboard, lists, request and removal-confirmation screens; emulator-only demo interactions.
 - [ ] Wire those interfaces to the real authenticated API (requests, codes, last-seen and challenges).
 - [ ] Friends-only last-seen information; allow players to opt out.
-- [ ] Keep online identity separate from local Pokemon/game resets; provide account recovery.
+- [x] New Game clears pet progress but preserves name, online token/code/friendships and saved Wi-Fi.
+- [x] Factory Reset confirms Yes/No, deletes the server trainer first (Wi-Fi required for an existing online token), then clears game, device identity and Wi-Fi.
+- [ ] Verify automatic registration and Factory Reset against a real ESP32 over Wi-Fi with valid TLS certificate and system time.
 
 ## Phase 3: Asynchronous internet battles
 
@@ -31,7 +33,7 @@
 
 ## Hosting
 
-- [ ] Implement an HTTPS PHP API in a `server/` folder in this same repository.
+- [x] Implement a minimal HTTPS PHP API in a `server/` folder in this same repository (registration/profile/deletion).
 - [ ] Create database migrations for profiles, devices, friendships, battles and turns.
-- [ ] Deploy API to existing IONOS shared hosting using its MariaDB database.
+- [x] Deploy initial registration/profile API to IONOS MariaDB; deploy the deletion update next.
 - [ ] Configure secrets only on the host, never in firmware or GitHub.
