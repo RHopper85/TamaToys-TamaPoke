@@ -41,6 +41,9 @@ const SaveField SAVE_FIELDS[] = {
   { "wlt", SK_U32 },    { "stps", SK_U32 },
   // the banked creatures, and what you are carrying
   { "party", SK_BYTES }, { "box", SK_BYTES }, { "bag", SK_BYTES },
+  // Phase 4 decoration inventory: two alternating CRC-protected checkpoints.
+  { "decA", SK_BYTES }, { "decB", SK_BYTES },
+  { "expA", SK_BYTES }, { "expB", SK_BYTES },
   // remembered LAN opponents -- its own key, same reasoning as the box
   { "rivals", SK_BYTES },
   // settings, so a restored device plays the way it did

@@ -32,46 +32,92 @@ void FakeESP::restart(){ gRestarted = true; }   // not exit(): the test continue
 void setup(); void render(); void handleSerial();
 extern Pet pet;
 
+#define TRACE(s) do { fprintf(stderr,"CONSOLE_TRACE: %s\n",s); fflush(stderr); } while(0)
 static int bad=0;
 static void ck(bool ok,const char*w){printf("%s  %s\n",ok?"PASS":"FAIL",w); if(!ok)bad++;}
 
 // Runs the queued lines through the console with stdout captured, and returns
 // everything it printed.
-static std::string runConsole(const std::vector<std::string> &lines){
-  gIn = lines; gAt = 0;
-  char path[] = "/tmp/tamapoke_console_XXXXXX";
-  int fd = mkstemp(path);
-  if (fd < 0) return "";
+static std::string runConsole(const std::vector<std::string> &lines) {
+  gIn = lines;
+  gAt = 0;
+
+  FILE *tmp = tmpfile();
+  if (!tmp) {
+    perror("console_test: tmpfile");
+    return "";
+  }
+
   fflush(stdout);
+
   int saved = dup(fileno(stdout));
-  dup2(fd, fileno(stdout));
-  while (gAt < gIn.size()) handleSerial();
+  if (saved < 0 || dup2(fileno(tmp), fileno(stdout)) < 0) {
+    perror("console_test: stdout redirect");
+    if (saved >= 0) close(saved);
+    fclose(tmp);
+    return "";
+  }
+
+  while (gAt < gIn.size()) {
+    handleSerial();
+  }
+
   fflush(stdout);
   dup2(saved, fileno(stdout));
   close(saved);
-  lseek(fd, 0, SEEK_SET);
+
+  rewind(tmp);
+
   std::string out;
-  char b[4096]; ssize_t n;
-  while ((n = read(fd, b, sizeof(b))) > 0) out.append(b, (size_t)n);
-  close(fd);
-  remove(path);
+  char buffer[4096];
+  size_t n;
+
+  while ((n = fread(buffer, 1, sizeof(buffer), tmp)) > 0) {
+    out.append(buffer, n);
+  }
+
+  fclose(tmp);
   return out;
 }
 
 int main(){
+  TRACE("before setup");
   setup();
+  TRACE("after setup, before render");
   for (int i=0;i<4;i++) render();
+  TRACE("after render");
+  TRACE("before chooseStarter");
   if (pet.awaitingStarter()) pet.chooseStarter(4);
+  TRACE("after chooseStarter");
+  TRACE("before dbgHatchAs");
   if (pet.isEgg()) pet.dbgHatchAs(59,false);
+  TRACE("after dbgHatchAs");
   pet.ageMinutes = 61UL*MINUTES_PER_LEVEL;
   pet.ivAtk=29; pet.ivHp=13;
   pet.badges = 0x0055;
   pet.streak = 8;
   for (int i=0;i<3;i++){ PartyMon m; m.dex=100+i; m.level=44+i;
     m.ivAtk=m.ivDef=m.ivSpe=m.ivHp=17; party.replaceAt(i,m); }
-  pet.renameTrainer("ASH");        // persists everything above
+  TRACE("before renameTrainer");
+  pet.renameTrainer("ASH");
+  TRACE("after renameTrainer");        // persists everything above
 
+  {
+  static uint8_t probe[SAVE_TRANSFER_MAX];
+  size_t exportBytes = saveExport(probe, sizeof(probe));
+
+  fprintf(stderr,
+          "CONSOLE_DIAG: direct saveExport=%zu bytes, capacity=%zu\n",
+          exportBytes, sizeof(probe));
+  fflush(stderr);
+}
+  TRACE("before EXPORT");
   std::string out = runConsole({"EXPORT"});
+  TRACE("after EXPORT");
+  fprintf(stderr,
+        "CONSOLE_DIAG: input consumed=%zu/%zu, captured bytes=%zu\n",
+        gAt, gIn.size(), out.size());
+  fflush(stderr);
   ck(out.find("# TamaPoke save") != std::string::npos, "EXPORT says what it is");
 
   // every IMPORT line it printed, in order
@@ -85,21 +131,33 @@ int main(){
     at = nl + 1;
   }
   ck(back.size() > 2, "and prints the save as a block of IMPORT commands");
+  // Do not dereference an empty vector if EXPORT failed. Surface the actual
+  // export failure instead of crashing before the first test result.
+  if (back.empty()) {
+    printf("FAIL  EXPORT produced no IMPORT commands\n");
+    printf("      console output: %s\n", out.c_str());
+    return 1;
+  }
   ck(back.back() == "IMPORT", "the last of which commits");
   printf("      (%u lines)\n", (unsigned)back.size());
 
   // --- wipe, then paste the block straight back
+  TRACE("before factoryReset");
   pet.factoryReset();
+  TRACE("after factoryReset");
   Pet gone; gone.begin();
   ck(strcmp(gone.trainerName,"ASH") != 0, "the wipe really took the save");
 
   gRestarted = false;
+  TRACE("before IMPORT");
   std::string res = runConsole(back);
+  TRACE("after IMPORT");
     ck(res.find("IMPORT MORE") != std::string::npos,
       "each import chunk acknowledges browser flow control");
   ck(res.find("IMPORT OK") != std::string::npos, "pasting the block back is accepted");
   ck(gRestarted, "and it reboots, as a restore has to");
 
+  TRACE("before reload");
   Pet p2; Party q2;
   p2.begin(); q2.begin();
   ck(!strcmp(p2.trainerName,"ASH"), "the trainer name came back");
@@ -111,6 +169,7 @@ int main(){
      "and the party");
 
   // --- a mistyped paste must not be applied
+  TRACE("before corrupt-import checks");
   {
     std::vector<std::string> mangled = back;
     // corrupt one hex digit in the middle of the block
@@ -148,6 +207,7 @@ int main(){
   // TR sets the training, and is bounded by the same IV ceiling the game is --
   // a debug command that could exceed trMaxFor() would let a test (or a curious
   // player) build a creature the balance table says cannot exist.
+  TRACE("before debug-console checks");
   {
     pet.ivAtk = 31; pet.ivDef = 8; pet.ivSpe = 31;
     pet.trAtk = pet.trDef = pet.trSpe = 0;
@@ -185,6 +245,7 @@ int main(){
        "nonsense arguments clamp instead of wrapping");
   }
 
+  TRACE("finished");
   printf("%s\n", bad?"FAILURES":"all good");
   return bad?1:0;
 }

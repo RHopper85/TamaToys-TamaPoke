@@ -31,6 +31,9 @@
 #include "pet.h"
 #include "items.h"
 #include "inventory.h"
+#include "decor_store.h"
+#include "habitat_sprites.h"
+#include "expedition.h"
 #include "wild.h"
 #include "sdmon.h"
 #include "rtcbat.h"
@@ -121,15 +124,15 @@ bool menuOpen = false;
 #define MENU_Y 70
 #define MENU_W 320
 #define MENU_H 326
-#define MENU_ROW_H 44
-#define MENU_ROW_GAP 6
-// 6 rows: STATS / BAG / POKEDEX / SETTINGS / RETIRE / CLOSE. The row height came
+#define MENU_ROW_H 34
+#define MENU_ROW_GAP 5
+// 7 rows: STATS / BAG / POKEDEX / HABITAT / SETTINGS / RETIRE / CLOSE. The row height came
 // down from 52 to fit the sixth: the panel spans 70..396, and the round display
 // gives a half-width of 166 there against the 160 a row needs, so the corners
 // stay on glass. Anything taller does not -- at 6 rows of 52 it would reach 413
 // and the bottom corners would fall off the bezel.
-#define MENU_ROWS 6
-#define MENU_ROW_Y(i) (MENU_Y + 16 + (i) * (MENU_ROW_H + MENU_ROW_GAP))
+#define MENU_ROWS 8
+#define MENU_ROW_Y(i) (MENU_Y + 12 + (i) * (MENU_ROW_H + MENU_ROW_GAP))
 
 // Party screen. partyPick != 0 means the newcomer needs a slot: the player
 // either taps someone to replace or lets it go.
@@ -294,6 +297,11 @@ void bagTap(int16_t x, int16_t y);
 uint8_t bagPages();
 void renderMart();
 void martTap(int16_t x, int16_t y);
+void renderHabitatEditor();
+void habitatTap(int16_t x, int16_t y);
+void expeditionTap(int16_t x, int16_t y);
+void renderExpeditions();
+void drawHabitatDecor();
 uint8_t martPages();
 void renderSettingsHub();
 void settingsHubTap(int16_t x, int16_t y);
@@ -604,10 +612,22 @@ uint8_t bagPage = 0;
 // spend at the Mart, then prove it at the gym.
 bool martOpen = false;
 uint8_t martPage = 0;
+bool habitatEditOpen = false;
+bool expeditionOpen = false;
+bool expeditionConfirm = false;
+bool expeditionJournal = false;
+uint8_t expeditionDest = 0;
+uint8_t expeditionPick = 0;
+uint8_t habitatCategory = DC_REST;
+uint8_t habitatPage = 0;
+uint32_t habitatMessageUntil = 0;
+const char *habitatMessage = nullptr;
+bool martDecorTab = false; // false = original consumables, true = permanent decorations
 // The item pending a buy confirmation; ITEM_NONE means no dialog is up. A
 // value rather than a bool, like partyDetail/galleryDetail, since the dialog
 // needs to remember WHICH row was tapped.
 ItemKey martConfirmItem = ITEM_NONE;
+uint8_t martConfirmDecor = 0; // separate ID space: never a consumable ItemKey
 #define MART_PER_PAGE 3
 // Rows start well below the wallet block -- it is bold/size-4 and, per
 // uiSafeHalfWidth(), needs to sit lower on the round panel than a plain title
@@ -982,6 +1002,8 @@ void setup() {
   party.begin();
   bag.begin();
   pet.begin();
+  decorBegin();  // Phase 4: independent persistent habitat inventory
+  expeditions.begin();  // Phase 5: dispatch escrow + offline expedition state
   TamaWifi::begin();
   TamaOnline::begin();
   // A soft reset wipes the pet namespace but preserves the trainer in the
@@ -1403,10 +1425,10 @@ void handleSerial() {
     Serial.printf("streak=%u bond=%u medals=0x%X\n", pet.streak, pet.bond, pet.medals);
     Serial.println("DONE");
   } else if (line == "BYE") {
-    pet.startFarewell();
+    if (!expeditions.active()) pet.startFarewell();
     Serial.println("DONE");
   } else if (line == "RUN") {
-    pet.startRunaway();
+    if (!expeditions.active()) pet.startRunaway();
     Serial.println("DONE");
   } else if (line == "BEEP") {
     sfxPlay(SFX_HATCH);  // prueba de audio
@@ -1606,7 +1628,7 @@ void handleTouch() {
     // dialog's YES box sits on top of party slot 4. Hold a slot, tap where you
     // think a creature is, lose the creature you are actually raising.
     // One question with one answer, so a new screen cannot be forgotten.
-    if (!holdFired && !swallowGesture && uiCurrentScreen() == SCR_MAIN && millis() - tStart > 3000 &&
+    if (!holdFired && !swallowGesture && !habitatEditOpen && uiCurrentScreen() == SCR_MAIN && millis() - tStart > 3000 &&
         abs(tXl - tX0) < 30 && abs(tYl - tY0) < 30 && inPetZone(tX0, tY0) &&
         !pet.isEgg() && !confirmUntil && !pet.ceremony) {
       confirmUntil = millis() + 10000;
@@ -1643,6 +1665,8 @@ void onSwipeV(int dir) {
   if (battleOpen) return;   // no swiping out of a fight
   const bool back = dir > 0;
 
+  if (expeditionOpen) { if (back) expeditionOpen = false; return; }
+  if (habitatEditOpen) { if (back) habitatEditOpen = false; return; }
   if (wifiOpen) { if (back) wifiBack(); return; }
   if (friendsOpen) { if (back) friendsBack(); return; }
   if (clockOpen) { if (back) clockOpen = false; return; }
@@ -1671,7 +1695,7 @@ void onSwipeV(int dir) {
 
   if (exploreOpen) { if (back) uiTileGo(TILE_PET); return; }
   if (martOpen) {
-    if (martConfirmItem) { if (back) martConfirmItem = ITEM_NONE; return; }
+    if (martConfirmItem || martConfirmDecor) { if (back) { martConfirmItem = ITEM_NONE; martConfirmDecor = 0; } return; }
     if (back) uiTileGo(TILE_PET);
     return;
   }
@@ -2064,7 +2088,9 @@ void onSwipe(int dir) {
   // taught on the first screen they ever see.
   if (pet.awaitingStarter()) { rpickSwipe(dir); return; }
   if (menuOpen) { menuOpen = false; return; }   // any swipe closes the menu
+  if (expeditionOpen) { expeditionOpen = false; return; }
   if (battleOpen) return;   // no swiping out of a fight
+  if (habitatEditOpen) { habitatEditOpen = false; return; }
   if (wifiOpen || settingsOpen || friendsOpen) return; // child screens use back
 
   int t = uiTileIndex();
@@ -2073,7 +2099,7 @@ void onSwipe(int dir) {
     if (galleryDetail) { galleryDetail = 0; galleryPmd.unload(); galleryDirty = true; return; }
     if (partyDetail) { partyDetail = 0; return; }
     if (partyPick) { partyPick = false; pet.clearEnded(); }
-    if (pet.ceremony || confirmUntil || martConfirmItem) return;
+    if (pet.ceremony || confirmUntil || martConfirmItem || martConfirmDecor) return;
     int n = t - dir;   // the content follows the finger
     // IT BUMPS. This is the whole point of the axis: a horizontal swipe can no
     // longer close anything, so it cannot be confused with paging.
@@ -2096,6 +2122,8 @@ void onSwipe(int dir) {
 }
 
 void onTap(int16_t x, int16_t y) {
+  if (expeditionOpen) { expeditionTap(x,y); return; }
+  if (habitatEditOpen) { habitatTap(x, y); return; }
   if (pet.awaitingStarter()) {  // primera partida: region y luego inicial
     if (!starterRegionDone) {
       int r = regionPickTap(x, y, RPICK_FOR_START);
@@ -2306,12 +2334,29 @@ void onTap(int16_t x, int16_t y) {
       if (i == 0) { cardOpen = true; cardPage = 1; }   // straight to the stats page
       else if (i == 1) { bagOpen = true; bagPage = 0; }
       else if (i == 2) { galleryOpen = true; galleryPick = true; galleryPage = 0; rpickPage = 0; galleryDetail = 0; galleryDirty = true; }
-      else if (i == 3) { settingsOpen = true; }
-      else if (i == 4) {
-        if (!pet.canRetireNow()) { sfxPlay(SFX_DENY); return; }
+      else if (i == 3) {
+        if (!pet.isEgg() && !pet.ceremony) {
+          // Repair Step 6/7 saves that permitted ON items invisible behind
+          // another decoration of the same category (or past the 4-object cap).
+          // Save as one transaction; roll back if NVS refuses the write.
+          if (decorSaveHealthy()) {
+            DecorState before = decor;
+            if (decor.normalizeHabitat() && !decorSave()) {
+              decor = before;
+              Serial.println("habitat: SAVE FAILED");
+            }
+          }
+          habitatEditOpen = true; habitatCategory = DC_REST; habitatPage = 0;
+          habitatMessage = nullptr;
+        } else sfxPlay(SFX_DENY);
+      }
+      else if (i == 4) { expeditionOpen = true; expeditionConfirm = false; expeditionJournal = false; expeditionPick = 0; }
+      else if (i == 5) { settingsOpen = true; }
+      else if (i == 6) {
+        if (expeditions.active() || !pet.canRetireNow()) { sfxPlay(SFX_DENY); return; }
         choiceKind = 3; choiceUntil = millis() + 12000;
       }
-      return;                                     // i == 5 is CLOSE: just shut
+      return;                                     // i == 7 is CLOSE: just shut
     }
     return;
   }
@@ -2397,10 +2442,10 @@ void onTap(int16_t x, int16_t y) {
       if (b1) { int16_t old = pet.speciesId; pet.evolve(); evoPmd.load(old, pet.shiny); }
       else if (b2) pet.declineEvolve();
     } else if (choiceKind == 3) {          // retirada a peticion
-      if (b1) pet.startRetire();
+      if (b1 && !expeditions.active()) pet.startRetire();
       // b2 is simply "no": nothing to decline, the row is always there
     } else if (choiceKind == 2) {          // despedida
-      if (b1) pet.startFarewell();
+      if (b1 && !expeditions.active()) pet.startFarewell();
       else if (b2) pet.declineFarewell();
     }
     choiceKind = 0;
@@ -2408,7 +2453,8 @@ void onTap(int16_t x, int16_t y) {
   }
   if (confirmUntil) {        // dialogo "soltar?": SI / NO
     if (millis() < confirmUntil && x >= 118 && x <= 218 && y >= 252 && y <= 304) {
-      pet.release();
+      if (!expeditions.active()) pet.release();
+      else sfxPlay(SFX_DENY);
     }
     confirmUntil = 0;
     return;
@@ -2448,8 +2494,8 @@ void onTap(int16_t x, int16_t y) {
   // itself to bed (Pet::tick, autoSleep).
   if (x >= FAR_BTN_X && x <= FAR_BTN_X + FAR_BTN_W &&
       y >= FAR_BTN_Y && y <= FAR_BTN_Y + FAR_BTN_H) {
-    if (pet.canRunawayNow()) { pet.startRunaway(); return; }
-    if (pet.wantFarewellButton()) { choiceKind = 2; choiceUntil = millis() + 12000; return; }
+    if (pet.canRunawayNow() && !expeditions.active()) { pet.startRunaway(); return; }
+    if (pet.wantFarewellButton() && !expeditions.active()) { choiceKind = 2; choiceUntil = millis() + 12000; return; }
   }
   for (int i = 0; i < BTN_COUNT; i++) {
     int dx = x - buttons[i].cx, dy = y - buttons[i].cy;
@@ -2724,13 +2770,14 @@ void uiTileGo(int i) {
   galleryDetail = 0;
   martOpen = false;
   martConfirmItem = ITEM_NONE;
+  martConfirmDecor = 0;
   switch (TILE[i].scr) {
     // The two multi-region screens land on their CHOOSER, never on whichever
     // region was last set. Opening straight into it is how Johto and Hoenn came
     // to be built, reachable, and completely invisible.
     case SCR_GYM: gymOpen = true; gymPick = true; gymPage = 0; rpickPage = 0; break;
     case SCR_EXPLORE: exploreOpen = true; break;
-    case SCR_MART: martOpen = true; martPage = 0; break;
+    case SCR_MART: martOpen = true; martPage = 0; martDecorTab = false; break;
     case SCR_PARTY: partyOpen = true; break;
     case SCR_GALLERY:
       galleryOpen = true; galleryPick = true; galleryPage = 0; rpickPage = 0;
@@ -2799,6 +2846,7 @@ uint8_t uiRimPage() {
 
 // dir > 0 is clockwise, which is forwards.
 void onRim(int dir) {
+  if (habitatEditOpen) return;
   if (rpickSwipe(-dir)) return;   // the chooser pages itself, and WRAPS
   uint8_t n = 1;
   uint8_t *p = uiRimTarget(&n);
@@ -3037,6 +3085,8 @@ void render() {
     renderGame();
     return;
   }
+  if (expeditionOpen) { renderExpeditions(); return; }
+  if (habitatEditOpen) { renderHabitatEditor(); return; }
   if (bagOpen) {
     renderBag();
     return;
@@ -3116,6 +3166,7 @@ void render() {
   // drawScene cubre los 466x466 completos: sin fillScreen(NEGRO) previo para
   // que un flush DMA solapado nunca capture negro a medias (anti-parpadeo)
   drawScene(pet.isEgg() ? 0 : DEX_TBL[pet.speciesId].biome, millis(), gNight);
+  if (!pet.isEgg()) drawHabitatDecor();
 
   if (pet.ceremony) {
     const DexEntry &d = DEX_TBL[pet.speciesId];
@@ -6349,6 +6400,300 @@ void renderCard() {
   gfx->flush();
 }
 
+// ---------- Phase 4: quiet habitat decor rendering ----------
+// Source art is in assets/decor/source; runtime RGB565 is in habitat_sprites.h.
+// The home screen keeps its controls. No placeholders are drawn for items
+// awaiting art, rather than misleading players with colored squares.
+struct HabitatPoint { int16_t x, y; };
+// Explicit, safe art anchors. The slot is for persistence, NOT a screen coordinate.
+// Assigning anchors by item category avoids the previous arbitrary slot scatter.
+static HabitatPoint habitatAnchor(uint8_t id, uint8_t ordinal) {
+  switch (decorDef(id).category) {
+    case DC_REST: return {125, 293};       // far left, at ground level
+    case DC_CARE: return {362, 293};       // far right, ground
+    case DC_TOY: return {356, 252};        // right edge, above the bowl
+    case DC_NATURE: return {120, 218};     // left, by the treeline
+    case DC_FURNITURE: return {120, 283};  // replaces/rests beside bed
+    case DC_ACCENT: return {351, 202};     // upper right wall/background
+    case DC_SPECIAL: return {351, 244};
+    default: return ordinal ? HabitatPoint{352, 217} : HabitatPoint{120, 217};
+  }
+}
+static const char *HABITAT_CATEGORY_NAMES[DC_COUNT] = {
+  "REST", "CARE", "TOYS", "NATURE", "FURNITURE", "ACCENTS", "SPECIAL"
+};
+// Draw a 24x24 sprite at 2x size. Runs of equal color are rendered in a
+// single rectangle to avoid 576 individual draw calls per object.
+static void drawHabitatArt(int16_t cx, int16_t cy, uint8_t id) {
+  const uint16_t *px = habitatSpriteFor(id);
+  if (!px) return;
+  for (int16_t y=0; y<24; ++y) {
+    int16_t x=0;
+    while (x<24) {
+      uint16_t col=px[y*24+x];
+      if (!col) { ++x; continue; }
+      int16_t x0=x++;
+      while (x<24 && px[y*24+x]==col) ++x;
+      gfx->fillRect(cx-24+x0*2,cy-24+y*2,(x-x0)*2,2,col);
+    }
+  }
+}
+void drawHabitatDecor() {
+  if (pet.ceremony) return;
+  // Four displayed objects on a 466px round screen keep the creature readable.
+  // Use stable category anchors, not placement-array indices as x/y coordinates.
+  uint8_t rendered=0;
+  uint8_t drawnCategory[DC_COUNT] = {};
+  for (uint8_t slot=0;slot<DECOR_SLOTS;++slot) {
+    uint8_t id=decor.placed(slot);
+    if (!id || !habitatSpriteFor(id)) continue;
+    uint8_t category=decorDef(id).category;
+    if (rendered>=4 || drawnCategory[category]) continue;
+    HabitatPoint anchor=habitatAnchor(id,drawnCategory[category]);
+    drawHabitatArt(anchor.x,anchor.y,id);
+    ++drawnCategory[category]; ++rendered;
+  }
+}
+
+static uint8_t habitatOwnedCount(uint8_t cat) {
+  uint8_t n = 0;
+  for (uint8_t id = 1; id < DECOR_ITEM_COUNT; ++id)
+    if (decor.owns(id) && decorDef(id).category == cat) ++n;
+  return n;
+}
+static uint8_t habitatOwnedAt(uint8_t cat, uint8_t index) {
+  for (uint8_t id = 1; id < DECOR_ITEM_COUNT; ++id) {
+    if (!decor.owns(id) || decorDef(id).category != cat) continue;
+    if (!index) return id;
+    --index;
+  }
+  return 0;
+}
+static int habitatSlotOf(uint8_t id) {
+  for (uint8_t slot=0;slot<DECOR_SLOTS;++slot)
+    if (decor.placed(slot)==id) return slot;
+  return -1;
+}
+static void habitatSetMessage(const char *message) {
+  habitatMessage = message; habitatMessageUntil = millis() + 2200;
+}
+static void habitatToggle(uint8_t id) {
+  if (!decorSaveHealthy()) { habitatSetMessage("SAVE NOT READY"); sfxPlay(SFX_DENY); return; }
+  if (!habitatSpriteFor(id)) { habitatSetMessage("ART COMING SOON"); sfxPlay(SFX_DENY); return; }
+  DecorState before = decor;
+  if (!decor.toggleHabitat(id)) {
+    habitatSetMessage("ROOM FULL"); sfxPlay(SFX_DENY); return;
+  }
+  if (!decorSave()) {
+    decor = before;
+    habitatSetMessage("SAVE FAILED"); sfxPlay(SFX_DENY); return;
+  }
+  habitatMessage = nullptr;
+  sfxPlay(SFX_TAP);
+}
+
+void habitatTap(int16_t x, int16_t y) {
+  // Only the lower editor panel is interactive. Every tap on the scene
+  // outside it (including the title and pet) dismisses this overlay.
+  if (x < 42 || x > 424 || y < 267 || y > 463) {
+    habitatEditOpen = false; sfxPlay(SFX_TAP); return;
+  }
+  if (y >= 275 && y <= 330) {
+    if (x < 170) habitatCategory = (habitatCategory+DC_COUNT-1)%DC_COUNT;
+    else if (x > 295) habitatCategory = (habitatCategory+1)%DC_COUNT;
+    else return;
+    habitatPage = 0; habitatMessage = nullptr; sfxPlay(SFX_TAP); return;
+  }
+  if (y >= 335 && y < 405) {
+    uint8_t row = y < 370 ? 0 : 1;
+    uint8_t id = habitatOwnedAt(habitatCategory,(uint8_t)(habitatPage*2+row));
+    if (id) habitatToggle(id); else sfxPlay(SFX_DENY);
+    return;
+  }
+  if (y >= 410) {
+    uint8_t pages = (habitatOwnedCount(habitatCategory)+1)/2;
+    if (!pages) return;
+    if (x < 215 && habitatPage) --habitatPage;
+    else if (x > 250 && habitatPage+1 < pages) ++habitatPage;
+    sfxPlay(SFX_TAP);
+  }
+}
+
+void renderHabitatEditor() {
+  int h = sceneHour();
+  gNight = pet.sleeping || h < 6 || h >= 20;
+  drawScene(DEX_TBL[pet.speciesId].biome, millis(), gNight);
+  drawHabitatDecor();
+  drawPet();
+  gfx->fillRoundRect(128,35,210,50,12,UI_BG_DAY);
+  gfx->drawRoundRect(128,35,210,50,12,UI_INK);
+  gfx->setTextColor(UI_INK); gfx->setTextSize(2);
+  gfx->setCursor(170,53); gfx->print("HABITAT");
+  // Tap anywhere outside the lower panel to close, including the title.
+  gfx->fillRoundRect(42,267,382,196,18,UI_BG_DAY);
+  gfx->drawRoundRect(42,267,382,196,18,UI_INK);
+  gfx->setTextColor(UI_INK); gfx->setTextSize(2);
+  gfx->setCursor(68,294); gfx->print("<");
+  gfx->setCursor(353,294); gfx->print(">");
+  const char *cat = HABITAT_CATEGORY_NAMES[habitatCategory];
+  gfx->setCursor(CX-(int)strlen(cat)*6,294); gfx->print(cat);
+  uint8_t total = habitatOwnedCount(habitatCategory);
+  uint8_t pages = (total+1)/2;
+  if (habitatPage >= pages) habitatPage = 0;
+  for (uint8_t row = 0;row<2;++row) {
+    uint8_t id = habitatOwnedAt(habitatCategory,(uint8_t)(habitatPage*2+row));
+    int y = 335 + row*35;
+    gfx->fillRoundRect(77,y,312,32,6, id && habitatSlotOf(id)>=0 ? UI_BAR_OK : UI_TRACK);
+    gfx->setTextColor(UI_INK); gfx->setTextSize(1);
+    if (!id) { gfx->setCursor(165,y+12); gfx->print("NO MORE ITEMS"); continue; }
+    gfx->setCursor(94,y+12); gfx->print(decorDef(id).name);
+    gfx->setCursor(336,y+12); gfx->print(habitatSlotOf(id)>=0 ? "ON" : "OFF");
+  }
+  gfx->setTextColor(UI_INK); gfx->setTextSize(1);
+  gfx->setCursor(118,424); gfx->print("< PREV");
+  gfx->setCursor(299,424); gfx->print("NEXT >");
+  char count[24];
+  snprintf(count,sizeof(count),"%u/%u",(unsigned)(pages?habitatPage+1:0),(unsigned)pages);
+  gfx->setCursor(219,424); gfx->print(count);
+  if (habitatMessage && millis() < habitatMessageUntil) {
+    gfx->fillRoundRect(128,235,210,26,6,UI_BAR_WARN);
+    gfx->setTextColor(UI_INK); gfx->setCursor(164,243); gfx->print(habitatMessage);
+  }
+  gfx->flush();
+}
+
+
+// -------- Phase 5: Expedition screen (separate from active EXPLORE) --------
+static uint8_t expeditionCandidates() {
+  uint8_t n=0;
+  for(uint8_t i=0;i<PARTY_SLOTS;i++) if(!party.slots[i].empty()) n++;
+  for(uint8_t i=0;i<BOX_SLOTS;i++) if(!party.box[i].empty()) n++;
+  return n;
+}
+static bool expeditionCandidate(uint8_t index,bool &fromBox,uint8_t &slot,PartyMon &mon) {
+  for(uint8_t i=0;i<PARTY_SLOTS;i++) if(!party.slots[i].empty()) {
+    if(!index) {fromBox=false;slot=i;mon=party.slots[i];return true;}index--;
+  }
+  for(uint8_t i=0;i<BOX_SLOTS;i++) if(!party.box[i].empty()) {
+    if(!index) {fromBox=true;slot=i;mon=party.box[i];return true;}index--;
+  }
+  return false;
+}
+static void expeditionText(int x,int y,const char *v,uint8_t scale=2) {
+  gfx->setTextColor(UI_INK);gfx->setTextSize(scale);gfx->setCursor(x,y);gfx->print(v);
+}
+static void expeditionButton(int y,const char* label,bool enabled=true) {
+  gfx->fillRoundRect(82,y,302,43,11,enabled?UI_BG_DAY:UI_TRACK);
+  gfx->drawRoundRect(82,y,302,43,11,UI_INK);
+  expeditionText(CX-(int)strlen(label)*6,y+14,label);
+}
+void renderExpeditions() {
+  gfx->fillCircle(CX,CY,231,UI_BG_DAY);
+  expeditionText(137,47,"EXPEDITIONS");
+  gfx->drawRoundRect(52,90,362,315,15,UI_INK);
+  char line[64];
+  uint32_t now=rtcEpoch();
+  if(expeditionJournal) {
+    expeditionText(139,113,"JOURNAL");
+    uint8_t count=expeditions.journalCount();
+    if(!count) expeditionText(104,205,"NO TRIPS YET",1);
+    for(uint8_t i=0;i<count && i<5;i++) {
+      ExpeditionJournalEntry e=expeditions.journal(i);
+      if(e.destination>=EXP_DEST_COUNT) continue;
+      snprintf(line,sizeof(line),"%s",EXP_DESTS[e.destination].name);
+      expeditionText(77,157+i*39,line,1);
+      snprintf(line,sizeof(line),"%s  %u P$",e.outcome==EXP_SUCCESS?"SUCCESS":e.outcome==EXP_PARTIAL?"PARTIAL":"FAILED",(unsigned)e.coins);
+      expeditionText(77,170+i*39,line,1);
+      if(e.decoration && decorValid(e.decoration)) {
+        snprintf(line,sizeof(line),"FOUND: %s",decorDef(e.decoration).name);
+        expeditionText(245,170+i*39,line,1);
+      }
+    }
+    expeditionButton(353,"BACK TO TRIPS");
+  } else if(expeditions.active()) {
+    const ExpeditionDestination &d=EXP_DESTS[expeditions.destination()];
+    expeditionText(106,123,d.name,1);
+    if(expeditions.isReady(now)) {
+      expeditionText(120,181,"POKEMON RETURNED",1);
+      expeditionButton(249,"COLLECT REWARDS");
+    } else {
+      uint32_t secs=expeditions.remainingSeconds(now);
+      snprintf(line,sizeof(line),"AWAY: %02lu:%02lu:%02lu",(unsigned long)(secs/3600),
+               (unsigned long)((secs/60)%60),(unsigned long)(secs%60));
+      expeditionText(103,198,line,1);
+      expeditionText(118,240,"NO RECALL",2);
+      expeditionText(94,296,"WAIT FOR RETURN",1);
+    }
+    expeditionButton(351,"JOURNAL");
+  } else {
+    const ExpeditionDestination &d=EXP_DESTS[expeditionDest];
+    expeditionText(93,112,"CHOOSE DESTINATION",1);
+    gfx->fillRoundRect(85,145,296,50,10,UI_TRACK);
+    expeditionText(98,159,"<",2);expeditionText(350,159,">",2);
+    expeditionText(CX-(int)strlen(d.name)*3,166,d.name,1);
+    snprintf(line,sizeof(line),"%u MIN   DIFFICULTY %u",d.minutes,d.difficulty);
+    expeditionText(111,209,line,1);
+    uint8_t n=expeditionCandidates();
+    bool fromBox=false;uint8_t slot=0;PartyMon mon;
+    if(n) expeditionPick%=n;
+    bool found=n && expeditionCandidate(expeditionPick,fromBox,slot,mon);
+    if(found) {
+      const char *name=mon.nick[0]?mon.nick:DEX_TBL[mon.dex].name;
+      snprintf(line,sizeof(line),"< %s  LV%u >",name,(unsigned)mon.level);
+      expeditionText(94,256,line,1);
+      expeditionText(125,277,fromBox?"FROM PC BOX":"FROM PARTY",1);
+    } else expeditionText(109,265,"NO STORED POKEMON",1);
+    bool eligible=found && expeditionEligible(uint8_t(n+(!pet.isEgg()?1:0)),!pet.isEgg(),false) && expeditions.healthy();
+    if(!eligible) expeditionText(94,307,"NEED 2 POKEMON",1);
+    expeditionButton(339,expeditionConfirm?"CONFIRM SEND":"SEND POKEMON",eligible);
+    if(expeditionConfirm) expeditionText(120,326,"NO RECALL!",1);
+  }
+  expeditionText(182,423,"CLOSE",2);
+  gfx->flush();
+}
+void expeditionTap(int16_t x,int16_t y) {
+  if(x<52 || x>414 || y<90 || y>405 || y>=407) {
+    expeditionOpen=false;expeditionConfirm=false;return;
+  }
+  if(expeditionJournal) {
+    if(y>=347) expeditionJournal=false;
+    return;
+  }
+  if(expeditions.active()) {
+    if(y>=346) {expeditionJournal=true;return;}
+    if(y>=240 && y<306 && expeditions.isReady(rtcEpoch())) {
+      uint32_t coins=0;uint8_t decorId=0;ExpeditionOutcome outcome=EXP_FAILED;
+      if(expeditions.claim(rtcEpoch(),coins,decorId,outcome)) {
+        expeditionJournal=true;
+        uint32_t sum=pet.wallet+coins;
+        pet.wallet = sum > Pet::WALLET_CAP ? Pet::WALLET_CAP : sum;
+        pet.saveNow();sfxPlay(SFX_MEDAL);
+      } else sfxPlay(SFX_DENY);
+    }
+    return;
+  }
+  if(y>=145 && y<=200) {
+    expeditionDest=(uint8_t)((expeditionDest+(x<CX?EXP_DEST_COUNT-1:1))%EXP_DEST_COUNT);
+    expeditionConfirm=false;return;
+  }
+  uint8_t n=expeditionCandidates();
+  if(y>=244 && y<305 && n) {
+    expeditionPick=(uint8_t)((expeditionPick+(x<CX?n-1:1))%n);
+    expeditionConfirm=false;return;
+  }
+  if(y>=333 && y<=393) {
+    bool fromBox=false;uint8_t slot=0;PartyMon m;
+    bool eligible=n && expeditionCandidate(expeditionPick,fromBox,slot,m) &&
+      expeditionEligible(uint8_t(n+(!pet.isEgg()?1:0)),!pet.isEgg(),expeditions.active());
+    if(!eligible) {sfxPlay(SFX_DENY);return;}
+    if(!expeditionConfirm) {expeditionConfirm=true;sfxPlay(SFX_TAP);return;}
+    uint32_t epoch=rtcEpoch();
+    if(expeditions.dispatch(fromBox,slot,epoch,expeditionDest,!pet.isEgg()))
+      {sfxPlay(SFX_TAP);expeditionConfirm=false;}
+    else sfxPlay(SFX_DENY);
+  }
+}
+
 // ---------- menu overlay ----------
 
 // Row labels are built fresh each frame because two of them carry live counts.
@@ -6357,8 +6702,10 @@ static void menuRowLabel(int i, char *out, size_t n) {
     case 0: snprintf(out, n, "%s", T(S_STATS)); break;
     case 1: snprintf(out, n, "%s", T(S_BAG)); break;
     case 2: snprintf(out, n, T(S_POKEDEX_FMT), pet.registeredCount(), DEX_COUNT); break;
-    case 3: snprintf(out, n, "%s", T(S_SETTINGS)); break;
-    case 4: snprintf(out, n, "%s", T(S_RETIRE)); break;
+    case 3: snprintf(out, n, "%s", "HABITAT"); break;
+    case 4: snprintf(out, n, "%s", "EXPEDITIONS"); break;
+    case 5: snprintf(out, n, "%s", T(S_SETTINGS)); break;
+    case 6: snprintf(out, n, "%s", T(S_RETIRE)); break;
     default: snprintf(out, n, "%s", T(S_CLOSE)); break;
   }
 }
@@ -6385,7 +6732,8 @@ void drawMenu() {
   for (int i = 0; i < MENU_ROWS; i++) {
     int y = MENU_ROW_Y(i);
     bool close = (i == MENU_ROWS - 1);
-    bool dead = (i == 4 && !pet.canRetireNow());   // an egg or a companion
+    bool dead = (i == 6 && (expeditions.active() || !pet.canRetireNow())) ||
+                (i == 3 && (pet.isEgg() || pet.ceremony));   // an egg or a companion
     gfx->fillRoundRect(MENU_X + 18, y, MENU_W - 36, MENU_ROW_H, 12,
                        close || dead ? UI_TRACK : UI_BG_DAY);
     gfx->drawRoundRect(MENU_X + 18, y, MENU_W - 36, MENU_ROW_H, 12, UI_INK);
@@ -6436,6 +6784,7 @@ void drawMenu() {
 #define FOCUS_SWAP_RETRIES 3
 
 void focusSwap(uint8_t slot) {
+  if (expeditions.active()) { sfxPlay(SFX_DENY); return; }
   if (slot >= PARTY_SLOTS) return;
   PartyMon incoming = party.slots[slot];   // by value: the slot is about to change
   if (incoming.empty()) return;
@@ -6590,8 +6939,24 @@ void bagTap(int16_t x, int16_t y) {
 // rather than a second list kept here -- the same reasoning as the bag's
 // weighted drop table, so a future item only needs a price to appear.
 
+// Separate decoration IDs keep the existing item key and bag wire format stable.
+static uint8_t martDecorCount() {
+  uint8_t n = 0;
+  for (uint8_t id = 1; id < DECOR_ITEM_COUNT; ++id)
+    if (decorForSale(id)) ++n;
+  return n;
+}
+
+static uint8_t martDecorAt(uint8_t index) {
+  for (uint8_t id = 1; id < DECOR_ITEM_COUNT; ++id) {
+    if (!decorForSale(id)) continue;
+    if (index-- == 0) return id;
+  }
+  return 0;
+}
+
 uint8_t martPages() {
-  uint8_t n = martSellableCount();
+  uint8_t n = martDecorTab ? martDecorCount() : martSellableCount();
   return n ? (uint8_t)((n + MART_PER_PAGE - 1) / MART_PER_PAGE) : 1;
 }
 
@@ -6607,10 +6972,14 @@ void renderMart() {
   gfx->setCursor(CX - (int)strlen(T(S_MART)) * 9, 44);
   gfx->print(T(S_MART));
 
-  // Wallet is bold (size 4) and, unlike the title, sits directly on the night
-  // scene rather than a light pill -- inkColor() is what the main screen's own
-  // text uses to stay legible after dark, and these three lines need the same
-  // switch since nothing behind them does it for them.
+  // Category tabs: within the upper round display's safe horizontal chord.
+  gfx->fillRoundRect(89, 87, 140, 25, 6, martDecorTab ? UI_TRACK : UI_BAR_OK);
+  gfx->fillRoundRect(237, 87, 140, 25, 6, martDecorTab ? UI_BAR_OK : UI_TRACK);
+  gfx->setTextSize(2);
+  gfx->setTextColor(UI_INK);
+  gfx->setCursor(110, 92); gfx->print("ITEMS");
+  gfx->setCursor(260, 92); gfx->print("DECOR");
+
   uint16_t ink = inkColor();
   char wl[24];
   snprintf(wl, sizeof(wl), T(S_WALLET_FMT), (unsigned long)pet.wallet);
@@ -6628,27 +6997,30 @@ void renderMart() {
   gfx->setCursor(CX - (int)strlen(sv) * 6, 176);
   gfx->print(sv);
 
-  uint8_t n = martSellableCount();
+  uint8_t n = martDecorTab ? martDecorCount() : martSellableCount();
   uint8_t pages = martPages();
   if (martPage >= pages) martPage = 0;
-  for (uint8_t i = 0; i < MART_PER_PAGE; i++) {
+  for (uint8_t i = 0; i < MART_PER_PAGE; ++i) {
     uint8_t idx = (uint8_t)(martPage * MART_PER_PAGE + i);
     if (idx >= n) break;
-    ItemKey k = martKeyAt(idx);
-    uint16_t price = itemEntry(k).price;
-    bool afford = pet.wallet >= price;
-    int y = MART_ROW_Y(i);
-    // Green when affordable, matching Settings' SND ON pill (UI_BAR_OK /
-    // UI_BG_DAY); grey/dimmed otherwise, matching the bag's unusable rows.
+    const uint8_t id = martDecorTab ? martDecorAt(idx) : martKeyAt(idx);
+    const uint16_t price = martDecorTab ? decorDef(id).price : itemEntry(id).price;
+    const bool owned = martDecorTab && decor.owns(id);
+    const bool afford = !owned && pet.wallet >= price;
+    const int y = MART_ROW_Y(i);
     gfx->fillRoundRect(76, y, 314, 50, 10, afford ? UI_BAR_OK : UI_TRACK);
     gfx->drawRoundRect(76, y, 314, 50, 10, UI_INK);
-    gfx->setTextColor(afford ? UI_BG_DAY : 0x8410);
+    gfx->setTextColor(afford ? UI_BG_DAY : UI_INK);
     gfx->setTextSize(2);
-    gfx->setCursor(92, y + 17);
-    gfx->print(itemEntry(k).name);
-    char pr[10];
-    snprintf(pr, sizeof(pr), "$%u", price);
-    gfx->setCursor(374 - (int)strlen(pr) * 12, y + 17);
+    gfx->setCursor(88, y + 17);
+    // Keep labels within the price column, even for long decoration names.
+    char name[19];
+    snprintf(name, sizeof(name), "%.18s", martDecorTab ? decorDef(id).name : itemEntry(id).name);
+    gfx->print(name);
+    char pr[12];
+    if (owned) snprintf(pr, sizeof(pr), "OWNED");
+    else snprintf(pr, sizeof(pr), "$%u", price);
+    gfx->setCursor(380 - (int)strlen(pr) * 12, y + 17);
     gfx->print(pr);
   }
   if (pages > 1) {
@@ -6664,14 +7036,15 @@ void renderMart() {
   gfx->setCursor(CX - (int)strlen(T(S_BACK)) * 6, 414);
   gfx->print(T(S_BACK));
 
-  // Asked before it happens -- what the choice costs is on screen before the
-  // tap, same rule as the release/retire dialogs.
-  if (martConfirmItem) {
-    char q[40];
-    snprintf(q, sizeof(q), T(S_MART_BUY_Q), itemEntry(martConfirmItem).name);
+  if (martConfirmItem || martConfirmDecor) {
+    const char *name = martConfirmDecor ? decorDef(martConfirmDecor).name
+                                        : itemEntry(martConfirmItem).name;
+    const uint16_t price = martConfirmDecor ? decorDef(martConfirmDecor).price
+                                           : itemEntry(martConfirmItem).price;
+    char q[50];
+    snprintf(q, sizeof(q), T(S_MART_BUY_Q), name);
     char cost[24];
-    snprintf(cost, sizeof(cost), T(S_MART_PRICE_FMT),
-             (unsigned long)itemEntry(martConfirmItem).price);
+    snprintf(cost, sizeof(cost), T(S_MART_PRICE_FMT), (unsigned long)price);
     drawConfirmPanel(q, cost, nullptr, UI_INK_SOFT,
                      T(S_YES), UI_BAR_OK, UI_WHITE, T(S_NO), UI_TRACK, UI_INK);
   }
@@ -6680,39 +7053,62 @@ void renderMart() {
 }
 
 void martTap(int16_t x, int16_t y) {
-  if (martConfirmItem) {
+  if (martConfirmItem || martConfirmDecor) {
     int b1Top, b1Bot, b2Top, b2Bot;
     uiConfirmRects(&b1Top, &b1Bot, &b2Top, &b2Bot);
-    bool inX = (x >= CONFIRM_BTN_X && x <= CONFIRM_BTN_X + CONFIRM_BTN_W);
-    if (inX && y >= b1Top && y <= b1Bot) {           // YES
-      if (pet.spendWallet(itemEntry(martConfirmItem).price)) {
+    const bool inX = x >= CONFIRM_BTN_X && x <= CONFIRM_BTN_X + CONFIRM_BTN_W;
+    if (inX && y >= b1Top && y <= b1Bot) {
+      if (martConfirmDecor) {
+        const uint8_t id = martConfirmDecor;
+        const uint16_t price = decorDef(id).price;
+        if (decorSaveHealthy() && decorForSale(id) && !decor.owns(id) && pet.wallet >= price) {
+          // Save the grant before debiting the wallet. If debit fails, roll back
+          // the grant. The separate NVS records are NOT one atomic transaction;
+          // a reset between them may leave a free decoration, never lost money.
+          DecorState before = decor;
+          decor.unlock(id);
+          if (decorSave()) {
+            if (pet.spendWallet(price)) sfxPlay(SFX_TAP);
+            else { decor = before; decorSave(); sfxPlay(SFX_DENY); }
+          } else { decor = before; sfxPlay(SFX_DENY); }
+        } else sfxPlay(SFX_DENY);
+      } else if (pet.spendWallet(itemEntry(martConfirmItem).price)) {
         bag.add(martConfirmItem);
         sfxPlay(SFX_TAP);
-      } else {
-        sfxPlay(SFX_DENY);   // the wallet moved between the tap and the confirm
-      }
+      } else sfxPlay(SFX_DENY);
       martConfirmItem = ITEM_NONE;
-    } else if (inX && y >= b2Top && y <= b2Bot) {     // NO
+      martConfirmDecor = 0;
+    } else if (inX && y >= b2Top && y <= b2Bot) {
       martConfirmItem = ITEM_NONE;
+      martConfirmDecor = 0;
     }
     return;
   }
-  uint8_t n = martSellableCount();
-  for (uint8_t i = 0; i < MART_PER_PAGE; i++) {
-    uint8_t idx = (uint8_t)(martPage * MART_PER_PAGE + i);
+  if (x >= 89 && x <= 229 && y >= 87 && y <= 112) {
+    if (martDecorTab) { martDecorTab = false; martPage = 0; sfxPlay(SFX_TAP); }
+    return;
+  }
+  if (x >= 237 && x <= 377 && y >= 87 && y <= 112) {
+    if (!martDecorTab) { martDecorTab = true; martPage = 0; sfxPlay(SFX_TAP); }
+    return;
+  }
+  const uint8_t n = martDecorTab ? martDecorCount() : martSellableCount();
+  for (uint8_t i = 0; i < MART_PER_PAGE; ++i) {
+    const uint8_t idx = (uint8_t)(martPage * MART_PER_PAGE + i);
     if (idx >= n) break;
-    int ry = MART_ROW_Y(i);
+    const int ry = MART_ROW_Y(i);
     if (x < 76 || x > 390 || y < ry || y > ry + 50) continue;
-    ItemKey k = martKeyAt(idx);
-    if (pet.wallet < itemEntry(k).price) { sfxPlay(SFX_DENY); return; }
-    martConfirmItem = k;
+    const uint8_t id = martDecorTab ? martDecorAt(idx) : martKeyAt(idx);
+    const uint16_t price = martDecorTab ? decorDef(id).price : itemEntry(id).price;
+    if (pet.wallet < price || (martDecorTab && (decor.owns(id) || !decorSaveHealthy()))) {
+      sfxPlay(SFX_DENY);
+      return;
+    }
+    if (martDecorTab) martConfirmDecor = id;
+    else martConfirmItem = id;
     sfxPlay(SFX_TAP);
     return;
   }
-  // Anywhere else, including the "tap: back" label, returns to the pet --
-  // same affordance the bag screen's own "anywhere else closes" gives, just
-  // going to the pet tile instead of closing a modal since the Mart is on
-  // the tile axis.
   uiTileGo(TILE_PET);
 }
 

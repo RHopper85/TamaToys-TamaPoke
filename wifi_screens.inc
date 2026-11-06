@@ -111,12 +111,11 @@ void renderSettingsHub() {
   if (resetView != RESET_NONE) { renderResetConfirm(); return; }
   wifiFrame("SETTINGS");
   wifiLabel("Device options", 87, 2, UI_INK_SOFT);
-  wifiButton(99, 111, 268, 49, "TIME / SOUND");
-  wifiButton(99, 169, 268, 49, "WI-FI");
-  wifiButton(99, 227, 268, 49, "NEW GAME");
-  wifiButton(99, 285, 268, 49, "FACTORY RESET");
-  wifiLabel("Reset options erase progress", 352, 1, UI_BAR_BAD);
-  wifiButton(132, 393, 202, 34, "BACK");
+  wifiButton(99, 105, 268, 43, "TIME / SOUND");
+  wifiButton(99, 154, 268, 43, "WI-FI");
+  wifiButton(99, 220, 268, 43, "NEW GAME");
+  wifiButton(99, 277, 268, 43, "FACTORY RESET");
+  wifiButton(132, 382, 202, 34, "BACK");
   gfx->flush();
 }
 
@@ -155,21 +154,21 @@ void settingsHubTap(int16_t x, int16_t y) {
     }
     return;
   }
-  if (wifiHit(x, y, 99, 111, 268, 49)) {
+  if (wifiHit(x, y, 99, 105, 268, 43)) {
     openClock();
     sfxPlay(SFX_TAP);
-  } else if (wifiHit(x, y, 99, 169, 268, 49)) {
+  } else if (wifiHit(x, y, 99, 154, 268, 43)) {
     wifiOpen = true;
     wifiView = WIFI_HOME;
     wifiPage = 0;
     sfxPlay(SFX_TAP);
-  } else if (wifiHit(x, y, 99, 227, 268, 49)) {
+  } else if (wifiHit(x, y, 99, 220, 268, 43)) {
     resetView = RESET_NEW_GAME;
     sfxPlay(SFX_TAP);
-  } else if (wifiHit(x, y, 99, 285, 268, 49)) {
+  } else if (wifiHit(x, y, 99, 277, 268, 43)) {
     resetView = RESET_FACTORY;
     sfxPlay(SFX_TAP);
-  } else if (wifiHit(x, y, 132, 393, 202, 34)) {
+  } else if (wifiHit(x, y, 132, 382, 202, 34)) {
     settingsOpen = false;
     sfxPlay(SFX_TAP);
   }

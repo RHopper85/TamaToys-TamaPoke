@@ -43,7 +43,7 @@ int main() {
   if (pet.awaitingStarter()) pet.chooseStarter(4);
 
   menuOpen = true;
-  onTap(233, uiMenuRowCenterY(3));
+  onTap(233, uiMenuRowCenterY(5));
   expect(settingsOpen, "Settings menu opens a hub");
   checkFrame("Settings hub renders");
   onTap(233, 193); // Wi-Fi row moved up to make room for reset options
