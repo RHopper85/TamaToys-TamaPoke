@@ -504,6 +504,7 @@ int main(int argc, char **argv) {
 
   printf("TamaPoke emulator — click to touch, drag to swipe, hold 3s to release.\n");
   printf("Type serial commands here (STATS, IV 31 31 31 31, EGG 150 1, LVL 73, WIPE...)\n");
+  printf("If terminal input does not work, focus the emulator and press F2 to type a command.\n");
   printf("Time scale x%u (suspended while you touch). Ctrl-C or close the window to quit.\n\n",
          emuTimeScale());
 
@@ -514,10 +515,56 @@ int main(int argc, char **argv) {
   setup();
 
   bool run = true;
+  bool commandMode = false;
+  std::string commandText;
   std::vector<uint32_t> px(PANEL * PANEL);
   while (run) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
+      // F2 opens a small command-entry mode in the emulator itself. This
+      // bypasses Windows/MinTTY stdin problems and uses the same serial queue.
+      if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F2 && !e.key.repeat) {
+        commandMode = !commandMode;
+        commandText.clear();
+        if (commandMode) {
+          SDL_StartTextInput();
+          SDL_SetWindowTitle(win, "TamaPoke - COMMAND (type, Enter to send; F2 to close)");
+          printf("\nemu: command mode ON - type in this window, press Enter to send\n");
+        } else {
+          SDL_StopTextInput();
+          SDL_SetWindowTitle(win, "TamaPoke (emulator)");
+          printf("emu: command mode OFF\n");
+        }
+        fflush(stdout);
+        continue;
+      }
+      if (commandMode && e.type == SDL_TEXTINPUT) {
+        for (const char *p = e.text.text; *p; ++p)
+          if ((unsigned char)*p >= 32 && (unsigned char)*p < 127 && commandText.size() < 256)
+            commandText += *p;
+        SDL_SetWindowTitle(win, (std::string("TamaPoke CMD: ") + commandText).c_str());
+        continue;
+      }
+      if (commandMode && e.type == SDL_KEYDOWN) {
+        if (e.key.keysym.sym == SDLK_BACKSPACE && !commandText.empty()) {
+          commandText.pop_back();
+          SDL_SetWindowTitle(win, (std::string("TamaPoke CMD: ") + commandText).c_str());
+        } else if (e.key.keysym.sym == SDLK_RETURN || e.key.keysym.sym == SDLK_KP_ENTER) {
+          if (!commandText.empty()) {
+            printf("emu CMD> %s\n", commandText.c_str());
+            g_lines.push_back(commandText);
+            commandText.clear();
+            SDL_SetWindowTitle(win, "TamaPoke CMD: (enter next command)");
+            fflush(stdout);
+          }
+        } else if (e.key.keysym.sym == SDLK_ESCAPE) {
+          commandMode = false;
+          commandText.clear();
+          SDL_StopTextInput();
+          SDL_SetWindowTitle(win, "TamaPoke (emulator)");
+        }
+        continue;
+      }
       if (e.type == SDL_QUIT) run = false;
       // Every mouse event pulses the touch INT, the way the CST9217 does on the
       // board. The sketch ignores the panel entirely until that fires.
@@ -557,6 +604,7 @@ int main(int argc, char **argv) {
     SDL_Delay(5);
   }
 
+  if (commandMode) SDL_StopTextInput();
   nvsSave(save);
   printf("\nemu: state saved to %s\n", save);
   SDL_DestroyTexture(tex);

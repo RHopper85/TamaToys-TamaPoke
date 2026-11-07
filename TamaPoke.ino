@@ -26,6 +26,7 @@
 #include "badges.h"
 #include "avatars.h"
 #include <stdarg.h>
+#include <string.h>
 #include "party.h"
 #include "save.h"
 #include "pet.h"
@@ -616,6 +617,9 @@ bool habitatEditOpen = false;
 bool expeditionOpen = false;
 bool expeditionConfirm = false;
 bool expeditionJournal = false;
+bool expeditionResultsOpen = false;
+ExpeditionRewards expeditionLastRewards;
+ExpeditionOutcome expeditionLastOutcome = EXP_FAILED;
 uint8_t expeditionDest = 0;
 uint8_t expeditionPick = 0;
 uint8_t habitatCategory = DC_REST;
@@ -6582,6 +6586,13 @@ static bool expeditionCandidate(uint8_t index,bool &fromBox,uint8_t &slot,PartyM
 static void expeditionText(int x,int y,const char *v,uint8_t scale=2) {
   gfx->setTextColor(UI_INK);gfx->setTextSize(scale);gfx->setCursor(x,y);gfx->print(v);
 }
+// Small, crisp, monochrome Poké Ball motif; no placeholder sprite artwork.
+static void expeditionBallIcon(int x,int y) {
+  gfx->drawCircle(x,y,8,UI_INK);
+  gfx->drawFastHLine(x-7,y,15,UI_INK);
+  gfx->fillCircle(x,y,3,UI_BG_DAY);
+  gfx->drawCircle(x,y,3,UI_INK);
+}
 static void expeditionButton(int y,const char* label,bool enabled=true) {
   gfx->fillRoundRect(82,y,302,43,11,enabled?UI_BG_DAY:UI_TRACK);
   gfx->drawRoundRect(82,y,302,43,11,UI_INK);
@@ -6593,7 +6604,32 @@ void renderExpeditions() {
   gfx->drawRoundRect(52,90,362,315,15,UI_INK);
   char line[64];
   uint32_t now=rtcEpoch();
-  if(expeditionJournal) {
+  if(expeditionResultsOpen) {
+    gfx->fillRoundRect(68,112,330,236,14,UI_TRACK);
+    gfx->drawRoundRect(68,112,330,236,14,UI_INK);
+    expeditionText(116,129,"TRIP COMPLETE",2);
+    gfx->drawFastHLine(95,160,276,UI_INK);
+    const char *status=expeditionLastOutcome==EXP_SUCCESS?"SUCCESS!":
+      expeditionLastOutcome==EXP_PARTIAL?"PARTIAL SUCCESS":"NO TREASURE";
+    expeditionText(CX-(int)strlen(status)*3,166,status,1);
+    snprintf(line,sizeof(line),"POKEDOLLARS  +%lu",(unsigned long)expeditionLastRewards.coins);
+    expeditionBallIcon(83,194);
+    expeditionText(98,192,line,1);
+    if(expeditionLastRewards.itemCount) {
+      for(uint8_t i=0;i<expeditionLastRewards.itemCount;i++) {
+        const ExpeditionItemReward &item=expeditionLastRewards.items[i];
+        snprintf(line,sizeof(line),"+%u  %s",(unsigned)item.count,itemEntry(item.key).name);
+        expeditionBallIcon(83,219+i*23);
+        expeditionText(98,215+i*23,line,1);
+      }
+    } else expeditionText(94,219,"NO ITEMS FOUND",1);
+    if(expeditionLastRewards.decoration) {
+      gfx->fillRoundRect(86,288,294,29,7,UI_BAR_WARN);
+      snprintf(line,sizeof(line),"RARE! %s",decorDef(expeditionLastRewards.decoration).name);
+      expeditionText(98,297,line,1);
+    } else expeditionText(98,298,"NO DECORATION FOUND",1);
+    expeditionButton(353,"DONE");
+  } else if(expeditionJournal) {
     expeditionText(139,113,"JOURNAL");
     uint8_t count=expeditions.journalCount();
     if(!count) expeditionText(104,205,"NO TRIPS YET",1);
@@ -6645,6 +6681,15 @@ void renderExpeditions() {
     } else expeditionText(109,265,"NO STORED POKEMON",1);
     bool eligible=found && expeditionEligible(uint8_t(n+(!pet.isEgg()?1:0)),!pet.isEgg(),false) && expeditions.healthy();
     if(!eligible) expeditionText(94,307,"NEED 2 POKEMON",1);
+    else {
+      const auto &species=DEX_TBL[mon.dex];
+      const bool match=!strcmp(typeName(species.type1),d.preferredType)||
+        !strcmp(typeName(species.type2),d.preferredType);
+      snprintf(line,sizeof(line),"SUCCESS %u%% %s",
+        (unsigned)expeditionSuccessChance(d.difficulty,mon.level,match),
+        match?"TYPE BONUS!":"");
+      expeditionText(111,306,line,1);
+    }
     expeditionButton(339,expeditionConfirm?"CONFIRM SEND":"SEND POKEMON",eligible);
     if(expeditionConfirm) expeditionText(120,326,"NO RECALL!",1);
   }
@@ -6655,6 +6700,10 @@ void expeditionTap(int16_t x,int16_t y) {
   if(x<52 || x>414 || y<90 || y>405 || y>=407) {
     expeditionOpen=false;expeditionConfirm=false;return;
   }
+  if(expeditionResultsOpen) {
+    if(y>=346) expeditionResultsOpen=false;
+    return;
+  }
   if(expeditionJournal) {
     if(y>=347) expeditionJournal=false;
     return;
@@ -6662,12 +6711,10 @@ void expeditionTap(int16_t x,int16_t y) {
   if(expeditions.active()) {
     if(y>=346) {expeditionJournal=true;return;}
     if(y>=240 && y<306 && expeditions.isReady(rtcEpoch())) {
-      uint32_t coins=0;uint8_t decorId=0;ExpeditionOutcome outcome=EXP_FAILED;
-      if(expeditions.claim(rtcEpoch(),coins,decorId,outcome)) {
-        expeditionJournal=true;
-        uint32_t sum=pet.wallet+coins;
-        pet.wallet = sum > Pet::WALLET_CAP ? Pet::WALLET_CAP : sum;
-        pet.saveNow();sfxPlay(SFX_MEDAL);
+      ExpeditionRewards rewards;ExpeditionOutcome outcome=EXP_FAILED;
+      if(expeditions.claim(rtcEpoch(),rewards,outcome)) {
+        expeditionLastRewards=rewards;expeditionLastOutcome=outcome;
+        expeditionResultsOpen=true;sfxPlay(SFX_MEDAL);
       } else sfxPlay(SFX_DENY);
     }
     return;
