@@ -176,10 +176,10 @@ bool ExpeditionManager::begin(){
 bool ExpeditionManager::dispatch(bool fromBox,uint8_t slot,uint32_t epoch,uint8_t dest,bool livePet){
  if(!healthy_||!epoch||dest>=EXP_DEST_COUNT||state_)return false;
  uint8_t available=livePet?1:0;
- for(uint8_t i=0;i<PARTY_SLOTS;i++)if(!party.slots[i].empty())available++;
+ for(uint8_t i=0;i<PARTY_BENCH_SLOTS;i++)if(!party.slots[i].empty())available++;
  for(uint8_t i=0;i<BOX_SLOTS;i++)if(!party.box[i].empty())available++;
  if(!expeditionEligible(available,livePet,false))return false;
- if(slot>=(fromBox?BOX_SLOTS:PARTY_SLOTS))return false;
+ if(slot>=(fromBox?BOX_SLOTS:PARTY_BENCH_SLOTS))return false;
  const PartyMon m=fromBox?party.box[slot]:party.slots[slot];
  if(m.empty())return false;
  state_=1;fromBox_=fromBox;slot_=slot;destination_=dest;traveler_=m;

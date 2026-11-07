@@ -89,6 +89,7 @@ void Party::begin() {
     if (s.dex < 1 || s.dex > DEX_COUNT) s.dex = 0;
     s.nick[sizeof(s.nick) - 1] = 0;
   }
+  normalizeOverflow();
 }
 
 void Party::save() {
@@ -115,6 +116,7 @@ int Party::boxFirstFree() const {
 }
 
 bool Party::boxAdd(const PartyMon &m) {
+  normalizeOverflow(); // prioritize legacy sixth Pokemon before adding new box entries
   int i = boxFirstFree();
   if (i < 0) return false;
   box[i] = m;
@@ -126,10 +128,38 @@ void Party::boxReleaseAt(uint8_t i) {
   if (i >= BOX_SLOTS) return;
   box[i] = PartyMon();
   boxSave();
+  normalizeOverflow();
+}
+
+void Party::normalizeOverflow() {
+  if (slots[PARTY_BENCH_SLOTS].empty()) return;
+  const PartyMon overflow = slots[PARTY_BENCH_SLOTS];
+  // Detect an interrupted migration: box saved, old slot not cleared yet.
+  for (int i = 0; i < BOX_SLOTS; ++i) {
+    if (!box[i].empty() && memcmp(&box[i], &overflow, sizeof(PartyMon)) == 0) {
+      slots[PARTY_BENCH_SLOTS] = PartyMon();
+      save();
+      return;
+    }
+  }
+  int free = boxFirstFree();
+  if (free < 0) {
+    Serial.println("party: legacy sixth Pokemon protected; free a PC Box slot");
+    return;
+  }
+  box[free] = overflow;
+  // Save destination first; do not clear original unless box write succeeded.
+  if (prefs.putBytes("box", box, sizeof(box)) != sizeof(box)) {
+    logKeyFailure("party", "box");
+    box[free] = PartyMon();
+    return;
+  }
+  slots[PARTY_BENCH_SLOTS] = PartyMon();
+  save();
 }
 
 void Party::swapPartyBox(uint8_t partyIdx, uint8_t boxIdx) {
-  if (partyIdx >= PARTY_SLOTS || boxIdx >= BOX_SLOTS) return;
+  if (partyIdx >= PARTY_BENCH_SLOTS || boxIdx >= BOX_SLOTS) return;
   PartyMon t = slots[partyIdx];
   slots[partyIdx] = box[boxIdx];
   box[boxIdx] = t;
@@ -145,7 +175,7 @@ uint8_t Party::count() const {
 }
 
 int Party::firstFree() const {
-  for (int i = 0; i < PARTY_SLOTS; i++)
+  for (int i = 0; i < PARTY_BENCH_SLOTS; i++)
     if (slots[i].empty()) return i;
   return -1;
 }
@@ -162,7 +192,9 @@ void Party::replaceAt(uint8_t i, const PartyMon &m) {
   if (i >= PARTY_SLOTS) return;
   slots[i] = m;
   save();
+  if (i == PARTY_BENCH_SLOTS) normalizeOverflow();
 }
+
 
 void Party::releaseAt(uint8_t i) {
   if (i >= PARTY_SLOTS) return;

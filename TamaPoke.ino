@@ -526,7 +526,7 @@ static bool gymUnlocked(uint8_t idx, bool hard) {
   return idx == 0 || pet.hasBadge(gymRegion, idx - 1, hard);
 }
 
-// Team select. Candidate 0 is the live pet, 1..PARTY_SLOTS are the banked
+// Team select. Candidate 0 is the live pet, 1..PARTY_BENCH_SLOTS are the banked
 // members, so one bitmask covers the whole pool.
 bool pickOpen = false;
 // The team picker serves the gym ladder and the LAN screen both. PICK_LAN is
@@ -1508,8 +1508,9 @@ void handleSerial() {
         Serial.println(party.add(m) ? "added" : "party full");
       }
     }
-    Serial.printf("party %u/%u:", party.count(), PARTY_SLOTS);
-    for (int i = 0; i < PARTY_SLOTS; i++) {
+    Serial.printf("party %u/%u (includes active):",
+                  (unsigned)(party.count() + (!pet.isEgg() ? 1 : 0)), PARTY_SLOTS);
+    for (int i = 0; i < PARTY_BENCH_SLOTS; i++) {
       const PartyMon &m = party.slots[i];
       if (m.empty()) Serial.print(" -");
       else Serial.printf(" %s%s(nv%u)", DEX_TBL[m.dex].name, m.shiny ? "*" : "", m.level);
@@ -2046,8 +2047,18 @@ void partyTap(int16_t x, int16_t y) {
     sfxPlay(SFX_TAP);
     return;
   }
-  for (int i = 0; i < PARTY_SLOTS; i++) {
-    if (partySlotAt(x, y) != i) continue;
+  for (int visual = 0; visual < PARTY_SLOTS; visual++) {
+    if (partySlotAt(x, y) != visual) continue;
+    // Slot 0 is always the current pet, not an extra storage slot.
+    if (visual == 0) {
+      if (boxSel || partyPick) { sfxPlay(SFX_DENY); return; }
+      partyOpen = false;
+      cardOpen = !pet.isEgg();
+      cardPage = 0;
+      sfxPlay(SFX_TAP);
+      return;
+    }
+    const int i = visual - 1; // Five banked Pokemon occupy ring slots 1..5.
     if (boxSel) {                    // a box creature is waiting for a slot
       party.swapPartyBox(i, boxSel - 1);
       boxSel = 0;
@@ -4235,7 +4246,7 @@ static void buildSquad(uint8_t maxLvl, uint8_t maxCount, uint16_t mask) {
     combatantFromPet(btlSquad[btlSquadN++], tmp);
     btlPetIn = true;      // the training reward goes to whoever fought for it
   }
-  for (int i = 0; i < PARTY_SLOTS && btlSquadN < maxCount; i++) {
+  for (int i = 0; i < PARTY_BENCH_SLOTS && btlSquadN < maxCount; i++) {
     if (party.slots[i].empty() || !(mask & (1 << (i + 1)))) continue;
     PartyMon m = party.slots[i];
     if (maxLvl && m.level > maxLvl) m.level = maxLvl;
@@ -5412,7 +5423,7 @@ static void renderPlayerBadges() {
   snprintf(l, sizeof(l), T(S_POKEDEX_FMT), pet.registeredCount(), DEX_COUNT);
   gfx->setCursor(CX - (int)strlen(l) * 6, 312);
   gfx->print(l);
-  snprintf(l, sizeof(l), T(S_PARTY_FMT), party.count());
+  snprintf(l, sizeof(l), T(S_PARTY_FMT), (unsigned)(party.count() + (!pet.isEgg() ? 1 : 0)));
   gfx->setCursor(CX - (int)strlen(l) * 6, 338);
   gfx->print(l);
   if (playerBadgeRegion == 0) {
@@ -5602,20 +5613,20 @@ void renderSpeed() {
 // bringing the right type -- and the squad used to be simply whoever sat first
 // in the party.
 
-// candidate n: 0 = the live pet, 1..PARTY_SLOTS = banked members
+// candidate n: 0 = the live pet, 1..PARTY_BENCH_SLOTS = banked members
 bool pickExists(uint8_t n) {
   if (n == 0) return !pet.isEgg();
-  return n <= PARTY_SLOTS && !party.slots[n - 1].empty();
+  return n <= PARTY_BENCH_SLOTS && !party.slots[n - 1].empty();
 }
 uint8_t pickChosen() {
   uint8_t c = 0;
-  for (uint8_t n = 0; n <= PARTY_SLOTS; n++)
+  for (uint8_t n = 0; n <= PARTY_BENCH_SLOTS; n++)
     if (pickExists(n) && (squadMask & (1 << n))) c++;
   return c;
 }
 uint8_t pickCandidates() {
   uint8_t c = 0;
-  for (uint8_t n = 0; n <= PARTY_SLOTS; n++)
+  for (uint8_t n = 0; n <= PARTY_BENCH_SLOTS; n++)
     if (pickExists(n)) c++;
   return c;
 }
@@ -5697,7 +5708,7 @@ void renderPick() {
   gfx->print(sub);
 
   uint8_t seen = 0, drawn = 0;
-  for (uint8_t n = 0; n <= PARTY_SLOTS; n++) {
+  for (uint8_t n = 0; n <= PARTY_BENCH_SLOTS; n++) {
     if (!pickExists(n)) continue;
     if (seen++ < pickPage * PICK_PER_PAGE) continue;
     if (drawn >= PICK_PER_PAGE) break;
@@ -5765,7 +5776,7 @@ void pickTap(int16_t x, int16_t y) {
     return;
   }
   uint8_t seen = 0, drawn = 0;
-  for (uint8_t n = 0; n <= PARTY_SLOTS; n++) {
+  for (uint8_t n = 0; n <= PARTY_BENCH_SLOTS; n++) {
     if (!pickExists(n)) continue;
     if (seen++ < pickPage * PICK_PER_PAGE) continue;
     if (drawn >= PICK_PER_PAGE) break;
@@ -6570,12 +6581,12 @@ void renderHabitatEditor() {
 // -------- Phase 5: Expedition screen (separate from active EXPLORE) --------
 static uint8_t expeditionCandidates() {
   uint8_t n=0;
-  for(uint8_t i=0;i<PARTY_SLOTS;i++) if(!party.slots[i].empty()) n++;
+  for(uint8_t i=0;i<PARTY_BENCH_SLOTS;i++) if(!party.slots[i].empty()) n++;
   for(uint8_t i=0;i<BOX_SLOTS;i++) if(!party.box[i].empty()) n++;
   return n;
 }
 static bool expeditionCandidate(uint8_t index,bool &fromBox,uint8_t &slot,PartyMon &mon) {
-  for(uint8_t i=0;i<PARTY_SLOTS;i++) if(!party.slots[i].empty()) {
+  for(uint8_t i=0;i<PARTY_BENCH_SLOTS;i++) if(!party.slots[i].empty()) {
     if(!index) {fromBox=false;slot=i;mon=party.slots[i];return true;}index--;
   }
   for(uint8_t i=0;i<BOX_SLOTS;i++) if(!party.box[i].empty()) {
@@ -6832,7 +6843,7 @@ void drawMenu() {
 
 void focusSwap(uint8_t slot) {
   if (expeditions.active()) { sfxPlay(SFX_DENY); return; }
-  if (slot >= PARTY_SLOTS) return;
+  if (slot >= PARTY_BENCH_SLOTS) return;
   PartyMon incoming = party.slots[slot];   // by value: the slot is about to change
   if (incoming.empty()) return;
   bool wasEgg = pet.isEgg();
@@ -7461,7 +7472,8 @@ void renderParty() {
   gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
 
   char head[24];
-  snprintf(head, sizeof(head), T(S_PARTY_FMT), party.count());
+  snprintf(head, sizeof(head), T(S_PARTY_FMT),
+           (unsigned)(party.count() + (!pet.isEgg() ? 1 : 0)));
   gfx->setTextColor(UI_INK);
   gfx->setTextSize(3);
   gfx->setCursor(CX - (int)strlen(head) * 9, 42);
@@ -7496,7 +7508,35 @@ void renderParty() {
     gfx->print(T(S_PARTY_FULL));
   }
 
-  for (int i = 0; i < PARTY_SLOTS; i++) drawPartySlot(i, party.slots[i]);
+  // The active pet is a real party member, not a seventh creature.
+  // Keep the existing six-slot geometry and 6-slot save format unchanged.
+  if (!pet.isEgg()) {
+    PartyMon active = pet.toPartyMon();
+    drawPartySlot(0, active);
+    int ax, ay;
+    partySlotPos(0, &ax, &ay);
+    gfx->fillRoundRect(ax - 27, ay + 37, 54, 13, 4, UI_BAR_OK);
+    gfx->setTextColor(UI_WHITE);
+    gfx->setTextSize(1);
+    gfx->setCursor(ax - 18, ay + 39);
+    gfx->print("ACTIVE");
+  } else {
+    int ax, ay;
+    partySlotPos(0, &ax, &ay);
+    gfx->fillCircle(ax, ay, PSLOT_R, UI_TRACK);
+    gfx->drawCircle(ax, ay, PSLOT_R, UI_INK);
+    gfx->setTextColor(UI_INK_SOFT);
+    gfx->setTextSize(2);
+    gfx->setCursor(ax - 18, ay - 8);
+    gfx->print("EGG");
+  }
+  for (int i = 0; i < PARTY_BENCH_SLOTS; i++) drawPartySlot(i + 1, party.slots[i]);
+  if (!party.slots[PARTY_BENCH_SLOTS].empty()) {
+    gfx->setTextColor(UI_BAR_BAD);
+    gfx->setTextSize(1);
+    gfx->setCursor(121, PSLOT_PROMPT_Y);
+    gfx->print("LEGACY EXTRA: FREE BOX SPACE");
+  }
 
   // exit: an explicit button, always in the same place
   const char *ex = partyPick ? T(S_PARTY_LETGO) : T(S_CLOSE);

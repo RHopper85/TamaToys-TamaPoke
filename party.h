@@ -9,6 +9,9 @@
 // A runaway does not: it is the game's one punishing outcome, and letting a
 // neglected pet come back as a team member would take the sting out of it.
 #define PARTY_SLOTS 6
+// Keep six physical slots for backward-compatible saves. The active Pokemon
+// occupies one of those six; only five may be banked in Party::slots.
+#define PARTY_BENCH_SLOTS (PARTY_SLOTS - 1)
 // The box: storage beyond the six that fight. Deliberately a SEPARATE NVS key
 // rather than a bigger party blob -- growing that blob would change its stride
 // and the length-based migration in begin() cannot tell a stride change from a
@@ -66,9 +69,10 @@ public:
 
   void begin();                 // load from NVS
   uint8_t count() const;
-  bool isFull() const { return count() >= PARTY_SLOTS; }
+  bool isFull() const { return count() >= PARTY_BENCH_SLOTS; }
   int firstFree() const;        // index of the first empty slot, -1 if full
   bool add(const PartyMon &m);  // into the first free slot; false if full
+  void normalizeOverflow();     // migrate legacy sixth member into PC Box
   void replaceAt(uint8_t i, const PartyMon &m);
   void releaseAt(uint8_t i);    // free a slot again
   void save();
