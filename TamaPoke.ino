@@ -27,6 +27,9 @@
 #include "avatars.h"
 #include <stdarg.h>
 #include <string.h>
+#if defined(_WIN32) && !defined(ARDUINO_ARCH_ESP32)
+#include <time.h>  // host wall clock for Windows desktop emulator only
+#endif
 #include "party.h"
 #include "save.h"
 #include "pet.h"
@@ -1027,6 +1030,15 @@ void setup() {
 
   // reloj real: aplica el tiempo que estuvo apagado
   rtcBegin();
+#if defined(_WIN32) && !defined(ARDUINO_ARCH_ESP32)
+  // The SDL desktop emulator has no battery-backed RTC. Each launch would
+  // otherwise seed the same January 2026 epoch, rewinding saved expeditions.
+  // Use real wall-clock time so expeditions continue while the app is closed.
+  // ESP32 firmware never executes this block and retains its hardware RTC.
+  const time_t hostNow = time(nullptr);
+  if (hostNow > 0 && (uint64_t)hostNow <= UINT32_MAX)
+    rtcSetEpoch((uint32_t)hostNow);
+#endif
   batBegin();
   pwrSetup();
   if (!pedoBegin()) Serial.println("pedometer: no QMI8658 -- the Mart earns nothing this session");
@@ -6659,17 +6671,37 @@ void renderExpeditions() {
     expeditionButton(353,"BACK TO TRIPS");
   } else if(expeditions.active()) {
     const ExpeditionDestination &d=EXP_DESTS[expeditions.destination()];
-    expeditionText(106,123,d.name,1);
-    if(expeditions.isReady(now)) {
-      expeditionText(120,181,"POKEMON RETURNED",1);
+    const bool ready=expeditions.isReady(now);
+    const uint32_t left=expeditions.remainingSeconds(now);
+    const uint32_t total=uint32_t(d.minutes)*60u;
+    const uint32_t elapsed=total-left;
+
+    // A classic Pokemon-style status card with framed message boxes. Text
+    // remains inside the circular display, using the game's existing palette.
+    gfx->fillRoundRect(74,108,318,99,9,UI_TRACK);
+    gfx->drawRoundRect(74,108,318,99,9,UI_INK);
+    expeditionText(98,118,"CURRENT ADVENTURE",1);
+    gfx->drawFastHLine(94,137,277,UI_INK);
+    expeditionBallIcon(109,170);
+    expeditionText(139,154,d.name,1);
+    expeditionText(139,177,ready?"EXPEDITION COMPLETE":"EXPLORING THE AREA",1);
+
+    if(ready) {
+      expeditionText(131,223,"WELCOME BACK!",2);
+      expeditionText(108,316,"YOUR POKEMON RETURNED",1);
       expeditionButton(249,"COLLECT REWARDS");
     } else {
-      uint32_t secs=expeditions.remainingSeconds(now);
-      snprintf(line,sizeof(line),"AWAY: %02lu:%02lu:%02lu",(unsigned long)(secs/3600),
-               (unsigned long)((secs/60)%60),(unsigned long)(secs%60));
-      expeditionText(103,198,line,1);
-      expeditionText(118,240,"NO RECALL",2);
-      expeditionText(94,296,"WAIT FOR RETURN",1);
+      expeditionText(188,215,"RETURN IN",1);
+      snprintf(line,sizeof(line),"%02lu:%02lu:%02lu",(unsigned long)(left/3600),
+               (unsigned long)((left/60)%60),(unsigned long)(left%60));
+      expeditionText(CX-48,231,line,2);
+      expeditionText(94,271,"TRAVEL PROGRESS",1);
+      gfx->fillRoundRect(92,289,282,19,5,UI_TRACK);
+      gfx->drawRoundRect(92,289,282,19,5,UI_INK);
+      uint16_t progress=total?(uint16_t)((uint64_t)elapsed*274u/total):274;
+      if(progress>0)gfx->fillRoundRect(96,293,progress,11,3,UI_INK);
+      expeditionText(109,321,"Your Pokemon is exploring!",1);
+      expeditionText(125,336,"No recall until return.",1);
     }
     expeditionButton(351,"JOURNAL");
   } else {
