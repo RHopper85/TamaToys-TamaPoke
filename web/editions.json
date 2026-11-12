@@ -1,12 +1,12 @@
 {
   "schema": 2,
-  "repository": "squithy/TamaPokeLAN",
+  "repository": "RHopper85/TamaToys-TamaPoke",
   "maxReleases": 8,
   "current": {
     "name": "Current Pages build",
     "channel": "Unreleased",
     "manifest": "manifest.json",
-    "description": "Built from current main. Released versions remain available for rollback.",
-    "notes": "This build is newer than the published Releases. Its final changelog will be generated when its version tag is released."
+    "description": "The current TamaToys Pages build for ESP32-S3. Check release notes and back up before flashing.",
+    "notes": "This is the build published with the installer. Hardware installation should be verified on the ESP32-S3 before public release."
   }
 }

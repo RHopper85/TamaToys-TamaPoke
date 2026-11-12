@@ -165,13 +165,34 @@ attribution is allowed); see [`../CREDITS.md`](../CREDITS.md).
 
 ## Deploy (GitHub Pages)
 
-1. Repo settings → Pages → serve from `main`, folder `/web` (or move `web/` to
-   `docs/`). Pages gives HTTPS automatically.
-2. URL ends up at `https://<user>.github.io/<repo>/`.
+The public site for this fork is:
 
-> **Pages on private repos** needs GitHub Pro/Team. If you make the repo
-> **public** to use Pages for free, decide about the sprites first (see above and
-> CREDITS).
+`https://rhopper85.github.io/TamaToys-TamaPoke/`
+
+GitHub Pages' **Deploy from a branch** setting only supports the branch root
+(`/`) or `/docs`, **not `/web`**. If your site already publishes the `web/`
+folder at the project root URL, keep the existing **GitHub Actions Pages**
+deployment that builds and uploads the `web/` folder as the Pages artifact.
+Do not change the publishing source just to install the redesign.
+
+This redesign changes only web UI files plus the release repository catalogue.
+It does **not** rebuild or replace `web/firmware/*.bin`, `web/manifest.json`,
+`web/paks.json`, or `web/sprites-*.pak`; preserve those files from the actual
+release source.
+
+Do not move this installer to a different origin without checking firmware
+manifests and the same-origin sprite pack downloads.
+
+### TamaToys website redesign v1
+
+- Retro GBA-inspired home page and round TamaPoke device illustration in CSS.
+- Three-stage setup guide, larger install flow, region cards, save vault and help.
+- Fixes the malformed Google Fonts `<link>` in the previous `index.html`.
+- Points `editions.json` to `RHopper85/TamaToys-TamaPoke`, not upstream.
+- Retains the existing ESP Web Tools custom element, manifest, Web Serial
+  routines, sprite `PUT` protocol, save backup and restore handlers.
+- Responsive desktop and mobile layout (device interaction still requires
+  a supported desktop Chromium browser).
 
 ## Limitations
 
