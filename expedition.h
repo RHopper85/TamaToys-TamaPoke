@@ -17,6 +17,8 @@ public:
   bool active() const {return state_!=0;}
   bool isReady(uint32_t epoch) const;
   uint8_t destination() const {return destination_;}
+  // Read-only view of the escrowed Pokemon, never transfer or modify it here.
+  const PartyMon &traveler() const {return traveler_;}
   uint32_t startedAt() const {return startEpoch_;}
   uint32_t remainingSeconds(uint32_t epoch) const;
   uint8_t journalCount() const {return journalCount_;}

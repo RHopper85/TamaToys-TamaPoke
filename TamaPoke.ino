@@ -6623,7 +6623,7 @@ static void expeditionButton(int y,const char* label,bool enabled=true) {
 }
 void renderExpeditions() {
   gfx->fillCircle(CX,CY,231,UI_BG_DAY);
-  expeditionText(137,47,"EXPEDITIONS");
+  expeditionText(CX-(int)strlen("EXPEDITIONS")*6,47,"EXPEDITIONS");
   gfx->drawRoundRect(52,90,362,315,15,UI_INK);
   char line[64];
   uint32_t now=rtcEpoch();
@@ -6653,7 +6653,7 @@ void renderExpeditions() {
     } else expeditionText(98,298,"NO DECORATION FOUND",1);
     expeditionButton(353,"DONE");
   } else if(expeditionJournal) {
-    expeditionText(139,113,"JOURNAL");
+    expeditionText(CX-(int)strlen("JOURNAL")*6,113,"JOURNAL");
     uint8_t count=expeditions.journalCount();
     if(!count) expeditionText(104,205,"NO TRIPS YET",1);
     for(uint8_t i=0;i<count && i<5;i++) {
@@ -6676,32 +6676,44 @@ void renderExpeditions() {
     const uint32_t total=uint32_t(d.minutes)*60u;
     const uint32_t elapsed=total-left;
 
-    // A classic Pokemon-style status card with framed message boxes. Text
-    // remains inside the circular display, using the game's existing palette.
-    gfx->fillRoundRect(74,108,318,99,9,UI_TRACK);
-    gfx->drawRoundRect(74,108,318,99,9,UI_INK);
-    expeditionText(98,118,"CURRENT ADVENTURE",1);
-    gfx->drawFastHLine(94,137,277,UI_INK);
-    expeditionBallIcon(109,170);
-    expeditionText(139,154,d.name,1);
-    expeditionText(139,177,ready?"EXPEDITION COMPLETE":"EXPLORING THE AREA",1);
+    // The expedition escrows the traveling Pokemon; it is no longer in Party
+    // or PC Box until collected. Render the actual escrowed identity here.
+    const PartyMon &traveler=expeditions.traveler();
+    const bool hasTraveler=!traveler.empty() && traveler.dex<=DEX_COUNT;
+    const char *name=hasTraveler?(traveler.nick[0]?traveler.nick:DEX_TBL[traveler.dex].name):"POKEMON";
+
+    gfx->fillRoundRect(74,105,318,112,9,UI_TRACK);
+    gfx->drawRoundRect(74,105,318,112,9,UI_INK);
+    expeditionText(98,114,"CURRENT ADVENTURE",1);
+    gfx->drawFastHLine(94,133,277,UI_INK);
+    const uint8_t *portrait=hasTraveler?thumbs.get(traveler.dex):nullptr;
+    if(portrait) drawThumb(portrait,87,144,1,false);
+    else expeditionBallIcon(111,170);
+    snprintf(line,sizeof(line),"%.12s  Lv.%u",name,hasTraveler?(unsigned)traveler.level:0u);
+    expeditionText(149,141,line,1);
+    expeditionText(149,159,d.name,1);
+    snprintf(line,sizeof(line),"%u MIN  DIFFICULTY %u",(unsigned)d.minutes,(unsigned)d.difficulty);
+    expeditionText(149,177,line,1);
+    expeditionText(149,196,ready?"RETURNED!":"EXPLORING...",1);
 
     if(ready) {
-      expeditionText(131,223,"WELCOME BACK!",2);
-      expeditionText(108,316,"YOUR POKEMON RETURNED",1);
+      expeditionText(CX-(int)strlen("WELCOME BACK!")*6,226,"WELCOME BACK!",2);
+      snprintf(line,sizeof(line),"%.22s returned safely!",name);
+      expeditionText(CX-(int)strlen(line)*3,318,line,1);
       expeditionButton(249,"COLLECT REWARDS");
     } else {
-      expeditionText(188,215,"RETURN IN",1);
+      expeditionText(CX-(int)strlen("RETURN IN")*3,221,"RETURN IN",1);
       snprintf(line,sizeof(line),"%02lu:%02lu:%02lu",(unsigned long)(left/3600),
                (unsigned long)((left/60)%60),(unsigned long)(left%60));
-      expeditionText(CX-48,231,line,2);
-      expeditionText(94,271,"TRAVEL PROGRESS",1);
+      expeditionText(CX-(int)strlen(line)*6,236,line,2);
+      expeditionText(94,273,"TRAVEL PROGRESS",1);
       gfx->fillRoundRect(92,289,282,19,5,UI_TRACK);
       gfx->drawRoundRect(92,289,282,19,5,UI_INK);
       uint16_t progress=total?(uint16_t)((uint64_t)elapsed*274u/total):274;
       if(progress>0)gfx->fillRoundRect(96,293,progress,11,3,UI_INK);
-      expeditionText(109,321,"Your Pokemon is exploring!",1);
-      expeditionText(125,336,"No recall until return.",1);
+      snprintf(line,sizeof(line),"%.25s is exploring!",name);
+      expeditionText(CX-(int)strlen(line)*3,319,line,1);
+      expeditionText(CX-(int)strlen("No recall until return.")*3,335,"No recall until return.",1);
     }
     expeditionButton(351,"JOURNAL");
   } else {
