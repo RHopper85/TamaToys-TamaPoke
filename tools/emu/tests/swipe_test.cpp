@@ -88,7 +88,7 @@ int main(){
   if (pet.isEgg()) pet.dbgHatchAs(6,false);
   pet.ageMinutes = 60UL*60; pet.relearnFromLevel();
   while (pet.hasLearnOffer()) pet.declineLearn();
-  for (int i=0;i<PARTY_SLOTS;i++){ PartyMon m; m.dex=9+i; m.level=40;
+  for (int i=0;i<PARTY_BENCH_SLOTS;i++){ PartyMon m; m.dex=9+i; m.level=40;
     m.ivAtk=m.ivDef=m.ivSpe=m.ivHp=20; party.replaceAt(i,m); }
   for (int i=0;i<BOX_SLOTS;i++){ PartyMon m; m.dex=1+i; m.level=20;
     m.ivAtk=m.ivDef=m.ivSpe=m.ivHp=20; party.box[i]=m; }
@@ -100,7 +100,13 @@ int main(){
   clearAll(); movePickOpen=true; movePickParty=0; movePickSlot=0;
                                                   check("movepick", &movePickOpen, &movePickPage);
   clearAll(); pickTrainer=7; pickHard=false; pickDefault(squadCap(7,false)); pickOpen=true;
-                                                  check("teampick", &pickOpen,     &pickPage);
+  // Active + five bench members fit on one page; the rim must not page past it.
+  pickPage=0;
+  if (pickOpen && uiRimPages()==1) printf("PASS  teampick   has one page for six candidates\n");
+  else { printf("FAIL  teampick   expected one page for six candidates\n"); bad++; }
+  onRim(1);
+  if (pickOpen && pickPage==0) printf("PASS  teampick   stays open at the last page\n");
+  else { printf("FAIL  teampick   left its single page\n"); bad++; }
   // The bag is paged too. It needs enough DISTINCT items to reach a second page
   // -- with one page it would close on the swipe and the check would fail for
   // the right reason, which is not the same as passing.

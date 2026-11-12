@@ -47,6 +47,7 @@
 #include "audio.h"
 #include "netwifi.h"
 #include "online_identity.h"
+#include "gba_ui.h"
 
 // Version del firmware. Subir este numero en cada release (y manifest.json para
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
@@ -307,6 +308,8 @@ void expeditionTap(int16_t x, int16_t y);
 void renderExpeditions();
 void drawHabitatDecor();
 uint8_t martPages();
+static uint8_t martDecorCount();
+static uint8_t habitatOwnedCount(uint8_t cat);
 void renderSettingsHub();
 void settingsHubTap(int16_t x, int16_t y);
 bool startNewGame();
@@ -574,8 +577,8 @@ uint8_t gymPage = 0;
 #define GYM_ROWS 5
 #define GYM_ROW_Y(i) (110 + (i) * 50)
 #define GYM_ROW_H 44
-#define GYM_ROW_INSET 18   // how far a row stops short of the glass, so the
-                           // arc scrollbar at RIM_BAR_R has its own lane
+#define GYM_ROW_X 86       // fixed GBA card width (all leaders, every scroll position)
+#define GYM_ROW_W 292      // ends at x=378: 19px clear of scrollbar at x=397
 void gymRowRect(int i, int *x, int *y, int *w, int *h);
 // LAN remains attached to the trainer ladder; Explore is a peer destination on
 // the tile axis and no longer hides behind GYMS.
@@ -616,6 +619,11 @@ uint8_t bagPage = 0;
 // spend at the Mart, then prove it at the gym.
 bool martOpen = false;
 uint8_t martPage = 0;
+// Continuous vertical list positions. Unlike the old page numbers these are
+// pixel offsets, so a drag travels through every entry without a page break.
+int16_t martScroll = 0, gymScroll = 0, regionScroll = 0;
+int16_t galleryScroll = 0, bagScroll = 0, habitatScroll = 0;
+int16_t moveScroll = 0, wifiScroll = 0;
 bool habitatEditOpen = false;
 bool expeditionOpen = false;
 bool expeditionConfirm = false;
@@ -659,6 +667,14 @@ bool wildCaught = false;
 ItemKey wildDrops[4] = { ITEM_NONE, ITEM_NONE, ITEM_NONE, ITEM_NONE };
 uint8_t wildDropN = 0;
 uint8_t btlBagPage = 0;
+// Four items fit per battle-bag page; unlike the field bag, these use the
+// 2x2 touch grid, so horizontal swipes/arrows switch pages.
+static uint8_t btlBagPages() {
+  uint8_t count=0;
+  for(uint8_t i=0;i<bag.distinctCount();i++)
+    if(itemUsableInBattle(bag.keyAt(i))) count++;
+  return count?(uint8_t)((count+3)/4):1;
+}
 
 // Animation. Deliberately built on the thumbnails the screen already draws
 // rather than on PmdMon: three PmdMon blobs are live already, and the battle
@@ -688,6 +704,7 @@ uint8_t btlMenu = 0;
 #define BTL_HIT_MS 420
 char btlMsg[6][40];
 uint8_t btlMsgCount = 0;   // queued lines; a tap shows the next
+static bool btlItemTurnPending = false;  // show actual heal before foe retaliates
 #define BTL_CELL_W 160
 #define BTL_CELL_H 54
 #define BTL_GRID_X 69
@@ -807,16 +824,14 @@ void uiArc(int cx, int cy, int r, int a0, int a1, int w, uint16_t col) {
 #define RIM_BAR_A0 55
 #define RIM_BAR_A1 145
 
-// A gym row's rectangle -- as wide as the panel allows AT ITS OWN HEIGHT, so
-// the ladder bulges in the middle instead of throwing away 66 px there and
-// hanging its top and bottom corners off the glass. The draw path and the tap
-// path both ask this; they used to share the literals 70 and 396.
+// One fixed card width for every Gym leader. The scroll bar lives outside
+// the card at x=397, so no level/lock text can be covered by the thumb.
+// Draw and touch handlers must both use this geometry.
 void gymRowRect(int i, int *x, int *y, int *w, int *h) {
   int ry = GYM_ROW_Y(i);
-  int half = uiSafeHalfWidthFor(ry, ry + GYM_ROW_H) - GYM_ROW_INSET;
-  if (x) *x = CX - half;
+  if (x) *x = GYM_ROW_X;
   if (y) *y = ry;
-  if (w) *w = half * 2;
+  if (w) *w = GYM_ROW_W;
   if (h) *h = GYM_ROW_H;
 }
 
@@ -1576,6 +1591,104 @@ void handleSerial() {
   }
 }
 
+// ---------- continuous list scrolling ----------
+// Small round screen: scroll the list contents; fixed headers, tabs, and BACK
+// are outside the touch viewport. No extra buffer/PSRAM allocation is needed.
+static int16_t *uiListScrollPtr() {
+  if (habitatEditOpen) return &habitatScroll;
+  switch (uiCurrentScreen()) {
+    case SCR_MART: return (martConfirmItem || martConfirmDecor) ? nullptr : &martScroll;
+    case SCR_GYM: return &gymScroll;
+    case SCR_GYMPICK: case SCR_DEXPICK: return &regionScroll;
+    case SCR_GALLERY: return galleryDetail ? nullptr : &galleryScroll;
+    case SCR_BAGSCR: return &bagScroll;
+    case SCR_MOVEPICK: return &moveScroll;
+    case SCR_WIFI:
+      if(wifiView==WIFI_NEARBY||wifiView==WIFI_SAVED)return &wifiScroll;
+      return nullptr;
+    default: return nullptr;
+  }
+}
+
+static bool uiListGeometry(int *y0, int *y1, int *stride, int *count) {
+  int top=0,bot=0,step=0,n=0;
+  if (habitatEditOpen) {
+    top=335; bot=405; step=35; n=habitatOwnedCount(habitatCategory);
+  } else switch (uiCurrentScreen()) {
+    case SCR_MART: top=210; bot=390; step=60;
+      n=martDecorTab?martDecorCount():martSellableCount(); break;
+    case SCR_GYM: top=110; bot=368; step=50; n=TRAINER_COUNT; break;
+    case SCR_GYMPICK: top=108; bot=325; step=72;
+      n=rpickRegions(RPICK_FOR_GYMS); break;
+    case SCR_DEXPICK: top=108; bot=355; step=72;
+      n=rpickRegions(RPICK_FOR_DEX); break;
+    case SCR_GALLERY: if(galleryDetail) return false;
+      top=84;bot=404;step=80; n=(GAL_SPAN+3)/4; break;
+    case SCR_BAGSCR: top=112;bot=405;step=58;n=bag.distinctCount();break;
+    case SCR_MOVEPICK: {
+      uint8_t moves[64];n=learnableList(moves,sizeof(moves));
+      top=76;bot=366;step=58;break;
+    }
+    case SCR_WIFI:
+      if(wifiView!=WIFI_NEARBY&&wifiView!=WIFI_SAVED)return false;
+      top=119;bot=370;step=62;
+      n=wifiView==WIFI_NEARBY?TamaWifi::networkCount():TamaWifi::savedCount();break;
+    default: return false;
+  }
+  if(y0)*y0=top;if(y1)*y1=bot;
+  if(stride)*stride=step;if(count)*count=n;
+  return true;
+}
+static int uiListMax() {
+  int y0,y1,step,n;
+  if(!uiListGeometry(&y0,&y1,&step,&n)) return 0;
+  const int rowHeight=habitatEditOpen?32:
+       uiCurrentScreen()==SCR_MART?50:
+       uiCurrentScreen()==SCR_GYM?GYM_ROW_H:
+       (uiCurrentScreen()==SCR_GYMPICK||uiCurrentScreen()==SCR_DEXPICK)?62:
+       uiCurrentScreen()==SCR_GALLERY?80:
+       uiCurrentScreen()==SCR_WIFI?48:50;
+  const int total=n?(n-1)*step+rowHeight:0;
+  int maxScroll=total-(y1-y0);
+  return maxScroll>0?maxScroll:0;
+}
+static int uiListClamp(int val) {
+  int maxScroll=uiListMax();
+  return val<0?0:val>maxScroll?maxScroll:val;
+}
+static bool uiListInArea(int16_t x,int16_t y) {
+  if(!uiListScrollPtr())return false;
+  int top,bot;
+  if(!uiListGeometry(&top,&bot,nullptr,nullptr))return false;
+  return x>=75 && x<=392 && y>=top && y<=bot;
+}
+// Return a data index, not a page-relative index. Partial rows at the edges
+// aren't selectable, matching the fully visible rows that are drawn.
+static int uiListIndexAt(int16_t y,int top,int bot,int stride,int height,
+                         int scroll,int count) {
+  if(y<top||y>=bot)return -1;
+  int idx=(int(y)-top+scroll)/stride;
+  if(idx<0||idx>=count)return -1;
+  int rowY=top+idx*stride-scroll;
+  return rowY>=top&&rowY+height<=bot&&y>=rowY&&y<rowY+height?idx:-1;
+}
+static void uiListDrawBar(int top,int bottom,int count,int stride,int scroll) {
+  if(!count||!stride)return;
+  const int visible=bottom-top;
+  const int total=count*stride;
+  if(total<=visible)return;
+  const int track=visible-8;
+  int thumb=track*visible/total;
+  if(thumb<22)thumb=22;
+  if(thumb>track)thumb=track;
+  const int maxScroll=uiListMax();
+  const int sy=top+4+(maxScroll?((track-thumb)*scroll/maxScroll):0);
+  gfx->fillRoundRect(398,top+4,5,track,2,GBA_DISABLED);
+  gfx->fillRoundRect(397,sy,7,thumb,3,GBA_BLUE);
+}
+static bool uiListDragging=false,uiListMoved=false;
+static int uiListStartScroll=0;
+
 // ---------- entrada tactil ----------
 
 bool inPetZone(int16_t x, int16_t y) {
@@ -1614,7 +1727,10 @@ void handleTouch() {
     // A drag that STARTS on the rim is a scroll, not a swipe. Deciding it at
     // touch-down rather than on release is what keeps it unambiguous: the
     // finger never has to be told afterwards what it meant.
-    rimActive = uiOnRim(x, y) && uiRimPages() > 1;
+    uiListDragging = uiListInArea(x,y);
+    uiListMoved = false;
+    if(uiListDragging) uiListStartScroll = *uiListScrollPtr();
+    rimActive = !uiListDragging && uiOnRim(x, y) && uiRimPages() > 1;
     rimA0 = uiRimAngle(x, y);
     rimSteps = 0;
     rimMoved = false;
@@ -1625,6 +1741,18 @@ void handleTouch() {
   } else if (pressed) {  // sigue apoyado
     tXl = x;
     tYl = y;
+    if (uiListDragging && !swallowGesture &&
+        abs(tYl-tY0)>12 && abs(tYl-tY0)>abs(tXl-tX0)) {
+      uiListMoved = true;
+      int16_t *offset=uiListScrollPtr();
+      if(offset) {
+        int next=uiListClamp(uiListStartScroll+tY0-tYl);
+        if(*offset!=next) {
+          *offset=(int16_t)next;
+          if(uiCurrentScreen()==SCR_GALLERY)galleryDirty=true;
+        }
+      }
+    }
     if (rimActive && !swallowGesture) {
       float d = uiRimAngle(x, y) - rimA0;
       while (d > 180.0f) d -= 360.0f;
@@ -1655,13 +1783,17 @@ void handleTouch() {
     lastInteract = millis();
     int dx = tXl - tX0, dy = tYl - tY0;
     uint32_t dt = millis() - tStart;
-    if (rimMoved) { rimActive = false; wasPressed = pressed; return; }   // it was a scroll
+    if (rimMoved || uiListMoved) {
+      rimActive = false; uiListDragging = false;
+      wasPressed = pressed; return;
+    }  // never turn a dragged item into a tap
     if (!holdFired && !swallowGesture) {
       if (abs(dx) > 80 && abs(dy) < 70 && dt < 800) onSwipe(dx > 0 ? 1 : -1);
       else if (abs(dy) > 80 && abs(dx) < 70 && dt < 800) onSwipeV(dy > 0 ? 1 : -1);
       else if (dt < 1500 && abs(dx) < 40 && abs(dy) < 40) onTap(tX0, tY0);
     }
     rimActive = false;
+    uiListDragging = false;
   }
   wasPressed = pressed;
 }
@@ -1724,7 +1856,7 @@ void onSwipeV(int dir) {
     if (gymPick) { if (back) uiTileGo(TILE_PET); return; }
     if (back) { gymPick = true; rpickPage = 0; sfxPlay(SFX_TAP); return; }
     gymRegion = (uint8_t)((gymRegion + 1) % GYM_REGIONS);
-    gymPage = 0;
+    gymPage = 0;gymScroll=0;
     sfxPlay(SFX_TAP);
     return;
   }
@@ -1742,7 +1874,7 @@ void onSwipeV(int dir) {
       return;
     }
     galleryRegion = (uint8_t)((galleryRegion + 1) % GAL_REGIONS);
-    galleryPage = 0;
+    galleryPage = 0;galleryScroll=0;
     galleryDirty = true;
     sfxPlay(SFX_TAP);
     return;
@@ -1772,35 +1904,39 @@ void onSwipeV(int dir) {
 // The detail sheet, shared by the party and the box so the two cannot drift.
 // `fromBox` picks which action the LEFT button offers; the right one is always
 // RELEASE, which is irreversible and therefore always asks first.
+// Original GBA-style centred text; fit long localized captions inside cards.
+static void ui7Centered(int cx, int y, const char *value, int width,
+                        uint8_t preferred, uint16_t color) {
+  if (!value) return;
+  uint8_t scale = preferred;
+  const int n = (int)strlen(value);
+  while (scale > 1 && n * 6 * scale > width) --scale;
+  gfx->setTextColor(color);
+  gfx->setTextSize(scale);
+  gfx->setCursor(cx - (n * 6 * scale) / 2, y);
+  gfx->print(value);
+}
+
 void renderMonSheet(const PartyMon &m, bool fromBox) {
   const DexEntry &d = DEX_TBL[m.dex];
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
+  gbaBackdrop(gfx, GBA_WATER, GBA_MIST);
   char head[36];
   snprintf(head, sizeof(head), "%s%s Lv.%u", m.shiny ? "*" : "",
            m.nick[0] ? m.nick : d.name, (unsigned)m.level);
-  gfx->setTextColor(d.accent);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(head) * 6, 40);
-  gfx->print(head);
+  gbaRibbon(gfx, head, 72, 28, 322, 41, GBA_BLUE,
+            strlen(head) > 23 ? 1 : 2);
   char ty[24];
   if (d.type2 == T_NONE) snprintf(ty, sizeof(ty), "%s", typeName(d.type1));
   else snprintf(ty, sizeof(ty), "%s/%s", typeName(d.type1), typeName(d.type2));
-  gfx->setTextColor(UI_INK_SOFT);
-  gfx->setTextSize(1);
-  gfx->setCursor(CX - (int)strlen(ty) * 3, 64);
-  gfx->print(ty);
-
+  ui7Centered(CX, 74, ty, 290, 1, GBA_PURPLE);
   for (int i = 0; i < MOVE_SLOTS; i++)
-    drawMoveRow(78 + i * 52, m.moves[i], false, m.dex);
+    drawMoveRow(86 + i * 52, m.moves[i], false, m.dex);
 
   char st[40];
   snprintf(st, sizeof(st), "ATK %u  DEF %u  SPD %u  HP %u",
            party.atkOf(m), party.defOf(m), party.speOf(m), party.vitOf(m));
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(1);
-  gfx->setCursor(CX - (int)strlen(st) * 3, 300);
-  gfx->print(st);
+  gbaFrame(gfx, 78, 299, 310, 27, GBA_CREAM, GBA_PURPLE);
+  ui7Centered(CX, 308, st, 280, 1, GBA_NAVY);
 
   // Which creature you are RAISING is now a choice you can make at any time.
   // It is a true exchange -- the one on the main screen takes the slot this one
@@ -1813,34 +1949,22 @@ void renderMonSheet(const PartyMon &m, bool fromBox) {
   bool leftOk = fromBox ? (party.firstFree() >= 0)
                         : (pet.ceremony == CER_NONE && !pet.awaitingStarter());
   const char *leftLbl = fromBox ? T(S_BOX_TAKE) : T(S_FOCUS);
-  gfx->fillRoundRect(PDET_L_X, PDET_BTN_Y, PDET_L_W, PDET_BTN_H, 10,
-                     leftOk ? UI_BAR_OK : UI_TRACK);
-  gfx->drawRoundRect(PDET_L_X, PDET_BTN_Y, PDET_L_W, PDET_BTN_H, 10, UI_INK);
-  gfx->setTextColor(leftOk ? UI_BG_DAY : 0x8410);
-  gfx->setTextSize(2);
-  gfx->setCursor(PDET_L_X + PDET_L_W / 2 - (int)strlen(leftLbl) * 6,
-                 PDET_BTN_Y + PDET_BTN_H / 2 - 8);
-  gfx->print(leftLbl);
-
-  gfx->fillRoundRect(PDET_R_X, PDET_BTN_Y, PDET_R_W, PDET_BTN_H, 10, UI_BAR_BAD);
-  gfx->drawRoundRect(PDET_R_X, PDET_BTN_Y, PDET_R_W, PDET_BTN_H, 10, UI_INK);
-  gfx->setTextColor(UI_WHITE);
-  gfx->setTextSize(1);
-  gfx->setCursor(PDET_R_X + PDET_R_W / 2 - (int)strlen(T(S_RELEASE_BTN)) * 3,
-                 PDET_BTN_Y + PDET_BTN_H / 2 - 4);
-  gfx->print(T(S_RELEASE_BTN));
+  gbaFrame(gfx, PDET_L_X, PDET_BTN_Y, PDET_L_W, PDET_BTN_H,
+           leftOk ? GBA_MIST : GBA_DISABLED,
+           leftOk ? GBA_GREEN : GBA_SHADOW);
+  ui7Centered(PDET_L_X + PDET_L_W / 2, PDET_BTN_Y + 15, leftLbl,
+              PDET_L_W - 20, 2, leftOk ? GBA_NAVY : GBA_SHADOW);
+  gbaFrame(gfx, PDET_R_X, PDET_BTN_Y, PDET_R_W, PDET_BTN_H,
+           GBA_CREAM, GBA_RED);
+  ui7Centered(PDET_R_X + PDET_R_W / 2, PDET_BTN_Y + 17,
+              T(S_RELEASE_BTN), PDET_R_W - 14, 1, GBA_NAVY);
 
   if (!leftOk) {
     const char *why = fromBox ? T(S_PARTY_FULL) : T(S_FOCUS_NOW);
-    gfx->setTextColor(UI_BAR_WARN);
-    gfx->setTextSize(1);
-    gfx->setCursor(CX - (int)strlen(why) * 3, PDET_BTN_Y - 14);
-    gfx->print(why);
+    ui7Centered(CX, PDET_BTN_Y - 10, why, 300, 1, GBA_RED);
   }
-  gfx->setTextColor(UI_INK_SOFT);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - strlen(T(S_BACK)) * 6, 404);
-  gfx->print(T(S_BACK));
+  gbaFrame(gfx, 132, 395, 202, 43, GBA_CREAM, GBA_BLUE);
+  ui7Centered(CX, 408, T(S_BACK), 178, 2, GBA_NAVY);
 
   // Asked before it happens, because nothing gets this creature back: it is not
   // a farewell, it does not join anything, and there is no undo.
@@ -2116,7 +2240,17 @@ void onSwipe(int dir) {
   if (pet.awaitingStarter()) { rpickSwipe(dir); return; }
   if (menuOpen) { menuOpen = false; return; }   // any swipe closes the menu
   if (expeditionOpen) { expeditionOpen = false; return; }
-  if (battleOpen) return;   // no swiping out of a fight
+  if (battleOpen) {
+    // Bag pages are swiped horizontally. A battle itself never exits by swipe.
+    if (btlMenu==3 && !btlMsgCount) {
+      int page=(int)btlBagPage-dir;  // swipe left moves content to next page
+      if(page>=0 && page<btlBagPages()) {
+        btlBagPage=(uint8_t)page;
+        sfxPlay(SFX_TAP);
+      }
+    }
+    return;
+  }
   if (habitatEditOpen) { habitatEditOpen = false; return; }
   if (wifiOpen || settingsOpen || friendsOpen) return; // child screens use back
 
@@ -2263,7 +2397,7 @@ void onTap(int16_t x, int16_t y) {
     int r = regionPickTap(x, y, RPICK_FOR_GYMS);
     if (r >= 0) {
       gymRegion = (uint8_t)r;
-      gymPage = 0;
+      gymPage = 0; gymScroll=0;
       gymPick = false;
       sfxPlay(SFX_TAP);
       return;
@@ -2285,7 +2419,11 @@ void onTap(int16_t x, int16_t y) {
       sfxPlay(SFX_TAP);
       return;
     }
-    if (x >= GYMBTN_X && x <= GYMBTN_X + GYMBTN_W &&
+    if(x>=101&&x<=229&&y>=GYMBTN_Y&&y<=GYMBTN_Y+GYMBTN_H) {
+      gymPick=true;regionScroll=0;rpickPage=0;
+      sfxPlay(SFX_TAP);return;
+    }
+    if (x >= 238 && x <= 366 &&
         y >= GYMBTN_Y && y <= GYMBTN_Y + GYMBTN_H) {
       gymOpen = false;
       lan.state = LINK_OFF;
@@ -2293,12 +2431,11 @@ void onTap(int16_t x, int16_t y) {
       sfxPlay(SFX_TAP);
       return;
     }
-    for (int i = 0; i < GYM_ROWS; i++) {
-      uint8_t idx = gymPage * GYM_ROWS + i;
-      if (idx >= TRAINER_COUNT) break;
-      int rx, ry, rw, rh;
-      gymRowRect(i, &rx, &ry, &rw, &rh);
-      if (x < rx || x > rx + rw || y < ry || y > ry + rh) continue;
+    int idx=uiListIndexAt(y,110,368,50,GYM_ROW_H,gymScroll,TRAINER_COUNT);
+    if(idx>=0) {
+      int ry=GYM_ROW_Y(idx)-gymScroll;
+      // Same stable rectangle as renderGyms(): scroll does not change card width.
+      if(x>=GYM_ROW_X&&x<=GYM_ROW_X+GYM_ROW_W) {
       if (!gymUnlocked(idx, gymHard)) { sfxPlay(SFX_DENY); return; }
       sfxPlay(SFX_TAP);
       gymOpen = false;
@@ -2309,8 +2446,9 @@ void onTap(int16_t x, int16_t y) {
       pickDefault(squadCap(idx, gymHard));
       pickOpen = true;
       return;
+      }
     }
-    gymOpen = false;
+    // Scroll-list blank space must not unexpectedly exit the Gym screen.
     return;
   }
   if (pet.hasLearnOffer()) {
@@ -2359,8 +2497,9 @@ void onTap(int16_t x, int16_t y) {
       sfxPlay(SFX_TAP);
       menuOpen = false;
       if (i == 0) { cardOpen = true; cardPage = 1; }   // straight to the stats page
-      else if (i == 1) { bagOpen = true; bagPage = 0; }
-      else if (i == 2) { galleryOpen = true; galleryPick = true; galleryPage = 0; rpickPage = 0; galleryDetail = 0; galleryDirty = true; }
+      else if (i == 1) { bagOpen = true; bagPage = 0; bagScroll=0; }
+      else if (i == 2) { galleryOpen = true; galleryPick = true; galleryPage = 0; rpickPage = 0;
+        galleryScroll=0; regionScroll=0; galleryDetail = 0; galleryDirty = true; }
       else if (i == 3) {
         if (!pet.isEgg() && !pet.ceremony) {
           // Repair Step 6/7 saves that permitted ON items invisible behind
@@ -2374,6 +2513,7 @@ void onTap(int16_t x, int16_t y) {
             }
           }
           habitatEditOpen = true; habitatCategory = DC_REST; habitatPage = 0;
+          habitatScroll=0;
           habitatMessage = nullptr;
         } else sfxPlay(SFX_DENY);
       }
@@ -2390,11 +2530,8 @@ void onTap(int16_t x, int16_t y) {
   if (movePickOpen) {
     uint8_t all[64];
     uint8_t n = learnableList(all, sizeof(all));
-    for (uint8_t i = 0; i < MOVE_PICK_PER_PAGE; i++) {
-      uint8_t idx = movePickPage * MOVE_PICK_PER_PAGE + i;
-      if (idx >= n) break;
-      int ry = MOVE_PICK_Y(i);
-      if (x < 70 || x > 396 || y < ry || y > ry + 50) continue;
+    int idx=uiListIndexAt(y,76,366,58,50,moveScroll,n);
+    if(idx>=0&&x>=70&&x<=396) {
       sfxPlay(SFX_TAP);
       // Swapping for a move already in another slot would silently duplicate
       // it, so trade the two slots instead of overwriting.
@@ -2406,7 +2543,7 @@ void onTap(int16_t x, int16_t y) {
       movePickOpen = false;
       return;
     }
-    movePickOpen = false;   // tap anywhere else = back to the moves page
+    if(y>=392)movePickOpen=false;  // fixed BACK only
     return;
   }
   if (partyOpen) {
@@ -2418,7 +2555,7 @@ void onTap(int16_t x, int16_t y) {
       int r = regionPickTap(x, y, RPICK_FOR_DEX);
       if (r >= 0) {
         galleryRegion = (uint8_t)r;
-        galleryPage = 0;
+        galleryPage = 0; galleryScroll=0;
         galleryDetail = 0;
         galleryDirty = true;
         galleryPick = false;
@@ -2441,7 +2578,7 @@ void onTap(int16_t x, int16_t y) {
         sfxPlay(SFX_TAP);
         movePickParty = 0;      // the live pet
         movePickSlot = i;
-        movePickPage = 0;
+        movePickPage = 0;moveScroll=0;
         movePickOpen = true;
         return;
       }
@@ -2522,7 +2659,7 @@ void onTap(int16_t x, int16_t y) {
   if (x >= FAR_BTN_X && x <= FAR_BTN_X + FAR_BTN_W &&
       y >= FAR_BTN_Y && y <= FAR_BTN_Y + FAR_BTN_H) {
     if (pet.canRunawayNow() && !expeditions.active()) { pet.startRunaway(); return; }
-    if (pet.wantFarewellButton() && !expeditions.active()) { choiceKind = 2; choiceUntil = millis() + 12000; return; }
+    // Farewell/retire now has a labelled, confirmed action in MAIN MENU.
   }
   for (int i = 0; i < BTN_COUNT; i++) {
     int dx = x - buttons[i].cx, dy = y - buttons[i].cy;
@@ -2668,35 +2805,37 @@ void drawScene(uint8_t biome, uint32_t now, bool night) {
 
 // primera partida: elige inicial entre Bulbasaur / Charmander / Squirtle
 void renderStarterSelect() {
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
+  gbaBackdrop(gfx, GBA_WATER, GBA_MIST);
   const char *t = T(S_CHOOSE_STARTER);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - strlen(t) * 6, 68);
-  gfx->print(t);
+  gbaRibbon(gfx, t, 78, 41, 310, 42, GBA_BLUE,
+            strlen(t) > 22 ? 1 : 2);
+  ui7Centered(CX, 91, "CHOOSE YOUR PARTNER", 288, 1, GBA_TEAL);
   for (int i = 0; i < starterCountShown(pet.region); i++) {
     int16_t d = starterOf(pet.region, i);
     const DexEntry &de = DEX_TBL[d];
     int ry = STARTER_ROW_Y + i * (STARTER_ROW_H + STARTER_ROW_GAP);
-    gfx->fillRoundRect(70, ry, 326, STARTER_ROW_H, 14, lerp565(de.accent, UI_WHITE, 6, 8));
-    gfx->drawRoundRect(70, ry, 326, STARTER_ROW_H, 14, de.accent);
-    const uint8_t *th = thumbs.get(d);     // miniatura del inicial (si la SD esta lista)
-    if (th) drawThumb(th, 76, ry - 5, 3, false);
-    gfx->setTextColor(UI_INK);
-    gfx->setTextSize(3);
-    gfx->setCursor(178, ry + 24);
+    const uint16_t accent = i == 0 ? GBA_GREEN : i == 1 ? GBA_RED : GBA_BLUE;
+    gbaFrame(gfx, 70, ry, 326, STARTER_ROW_H, GBA_CREAM, accent);
+    gfx->fillRect(78, ry + 7, 8, STARTER_ROW_H - 14, accent);
+    const uint8_t *th = thumbs.get(d);
+    if (th) drawThumb(th, 82, ry - 3, 2, false);
+    gfx->setTextColor(GBA_NAVY);
+    gfx->setTextSize(strlen(de.name) > 15 ? 1 : 2);
+    gfx->setCursor(176, ry + 17);
     gfx->print(de.name);
+    gfx->setTextSize(1);
+    gfx->setTextColor(GBA_PURPLE);
+    gfx->setCursor(177, ry + 44);
+    gfx->print(typeName(de.type1));
+    if (de.type2 != T_NONE) {
+      gfx->print(" / ");
+      gfx->print(typeName(de.type2));
+    }
   }
-  gfx->fillRoundRect(STARTER_BACK_X, STARTER_BACK_Y,
-                     STARTER_BACK_W, STARTER_BACK_H, 13, UI_TRACK);
-  gfx->drawRoundRect(STARTER_BACK_X, STARTER_BACK_Y,
-                     STARTER_BACK_W, STARTER_BACK_H, 13, UI_INK);
-  const char *back = T(S_BACK);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(back) * 6, STARTER_BACK_Y + 17);
-  gfx->print(back);
+  gbaFrame(gfx, STARTER_BACK_X, STARTER_BACK_Y,
+           STARTER_BACK_W, STARTER_BACK_H, GBA_CREAM, GBA_BLUE);
+  ui7Centered(CX, STARTER_BACK_Y + 17, T(S_BACK),
+              STARTER_BACK_W - 18, 2, GBA_NAVY);
   gfx->flush();
 }
 
@@ -2802,13 +2941,13 @@ void uiTileGo(int i) {
     // The two multi-region screens land on their CHOOSER, never on whichever
     // region was last set. Opening straight into it is how Johto and Hoenn came
     // to be built, reachable, and completely invisible.
-    case SCR_GYM: gymOpen = true; gymPick = true; gymPage = 0; rpickPage = 0; break;
+    case SCR_GYM: gymOpen = true; gymPick = true; gymPage = 0; rpickPage = 0; regionScroll=0; gymScroll=0; break;
     case SCR_EXPLORE: exploreOpen = true; break;
-    case SCR_MART: martOpen = true; martPage = 0; martDecorTab = false; break;
+    case SCR_MART: martOpen = true; martPage = 0; martScroll=0; martDecorTab = false; break;
     case SCR_PARTY: partyOpen = true; break;
     case SCR_GALLERY:
       galleryOpen = true; galleryPick = true; galleryPage = 0; rpickPage = 0;
-      galleryDirty = true;
+      galleryScroll=0; regionScroll=0; galleryDirty = true;
       break;
     case SCR_PLAYER: playerOpen = true; playerPage = 0; break;
     default: break;   // the pet tile is everything else being shut
@@ -2883,7 +3022,16 @@ void onRim(int dir) {
   if (v >= n) v = n - 1;          // CLAMPS: the rim can never close a screen
   if (v == (int)(*p)) return;
   *p = (uint8_t)v;
-  if (uiCurrentScreen() == SCR_GALLERY) galleryDirty = true;
+  switch(uiCurrentScreen()) {
+    case SCR_MART: martScroll=(int16_t)uiListClamp(v*MART_PER_PAGE*60);break;
+    case SCR_GYM: gymScroll=(int16_t)uiListClamp(v*GYM_ROWS*50);break;
+    case SCR_GALLERY:
+      galleryScroll=(int16_t)uiListClamp(v*4*80); galleryDirty=true;break;
+    case SCR_BAGSCR: bagScroll=(int16_t)uiListClamp(v*BAG_PER_PAGE*58);break;
+    case SCR_MOVEPICK: moveScroll=(int16_t)uiListClamp(v*MOVE_PICK_PER_PAGE*58);break;
+    case SCR_WIFI: wifiScroll=(int16_t)uiListClamp(v*4*62);break;
+    default: break;
+  }
   sfxPlay(SFX_TAP);
 }
 
@@ -2903,30 +3051,58 @@ static inline uint16_t uiChromeInk() {
   return uiCurrentScreen() == SCR_MAIN ? inkColor() : UI_INK;
 }
 
-// The tile axis, drawn on every screen that is on it. Five bound gestures that
-// nothing on the panel mentions is precisely how Johto and Hoenn came to be
-// built, reachable and completely invisible; an axis nobody can see is that
-// same mistake one level up.
+// Navigation cues live beside the tile position dots. Keep their tips in
+// the visible round glass at y=440; moving them further out clips the arrows.
+// These are visual hints, not extra buttons: the existing swipe and hit zones
+// are intentionally unchanged. Disabled arrows indicate an end of the axis.
+static void uiDrawHorizontalCues(bool canLeft, bool canRight, int y=TILE_DOT_Y) {
+  const uint16_t outline = GBA_NAVY;
+  const uint16_t active = GBA_BLUE;
+  const uint16_t dimmed = GBA_DISABLED;
+  // The small dark outline stays visible over both the home scene and menus.
+  gfx->fillTriangle(148,y-6,136,y,148,y+6,outline);
+  gfx->fillTriangle(146,y-3,140,y,146,y+3,canLeft?active:dimmed);
+  gfx->fillTriangle(318,y-6,330,y,318,y+6,outline);
+  gfx->fillTriangle(320,y-3,326,y,320,y+3,canRight?active:dimmed);
+}
+
+// The tile axis, drawn on every screen that is on it. Seven bound gestures
+// need visible orientation. The left/right arrows share the position dots and
+// reflect whether another tile actually exists in that direction.
 void uiDrawTileDots() {
   int t = uiTileIndex();
   if (t < 0) return;
+  // A horizontal swipe closes a Pokédex detail sheet, rather than moving a
+  // tile, and an open purchase/confirmation blocks it. Avoid false promises.
+  if (galleryDetail || martConfirmItem || martConfirmDecor || confirmUntil ||
+      choiceKind || feedMenuUntil) return;
   uint16_t ink = uiChromeInk();
-  if (t == TILE_PET) {
+  if (t == TILE_PET && uiCurrentScreen() == SCR_MAIN) {
+    // A pair of compact navigation tabs below the four care buttons, not
+    // unframed words crowded against their outlines. Swipe behavior unchanged.
     char left[28], right[24];
     snprintf(left, sizeof(left), "< %s", T(S_PARTY));
     snprintf(right, sizeof(right), "%s >", T(S_EXPLORE));
-    gfx->setTextColor(ink);
-    gfx->setTextSize(2);
-    gfx->setCursor(CX - 8 - (int)strlen(left) * 12, 408);
-    gfx->print(left);
-    gfx->setCursor(CX + 8, 408);
-    gfx->print(right);
+    const char *labels[2] = {left, right};
+    for (int i = 0; i < 2; ++i) {
+      const int bx = i ? 240 : 100;
+      gfx->fillRoundRect(bx, 410, 126, 24, 5, GBA_NAVY);
+      gfx->fillRoundRect(bx+2, 412, 122, 20, 3, GBA_CREAM);
+      const uint8_t sz = strlen(labels[i]) > 9 ? 1 : 2;
+      gfx->setTextColor(GBA_NAVY); gfx->setTextSize(sz);
+      gfx->setCursor(bx + (126 - (int)strlen(labels[i])*6*sz)/2,
+                     410 + (24 - 8*sz)/2);
+      gfx->print(labels[i]);
+    }
   }
   for (int i = 0; i < TILE_COUNT; i++) {
     int x = CX - (TILE_COUNT - 1) * 13 + i * 26;
     if (i == t) gfx->fillRoundRect(x - 9, TILE_DOT_Y - 3, 18, 7, 3, ink);
     else gfx->fillCircle(x, TILE_DOT_Y, 3, UI_TRACK);
   }
+  // onSwipe(+1) moves left; onSwipe(-1) moves right. At the two endpoints
+  // that gesture bumps rather than wrapping, so the matching arrow dims.
+  uiDrawHorizontalCues(t > 0, t + 1 < TILE_COUNT);
 }
 
 // The arc scrollbar, at 2-4 o'clock, replacing the dot rows the paged screens
@@ -2934,6 +3110,7 @@ void uiDrawTileDots() {
 // longest, and dots show position without showing extent. Both this and the
 // rim drag read uiRimTarget(), so they cannot disagree about where you are.
 void uiDrawRimBar() {
+  if(uiListScrollPtr())return;
   uint8_t n = uiRimPages();
   if (n < 2) return;
   uint8_t p = uiRimPage();
@@ -2992,55 +3169,57 @@ void exploreStepRegion(int8_t step) {
   }
 }
 
+// Patch 5: centered, readable pixel text for the GBA progress screens.
+// Text widths are the stock 6x8 bitmap font; keep layouts on the round glass.
+static void gbaP5Text(int centerX, int y, const char *label, uint8_t size,
+                       uint16_t color=GBA_NAVY) {
+  gfx->setTextColor(color);
+  gfx->setTextSize(size);
+  gfx->setCursor(centerX - (int)strlen(label)*3*size, y);
+  gfx->print(label);
+}
+
 void renderExplore() {
-  int h = sceneHour();
-  gNight = pet.sleeping || h < 6 || h >= 20;
-  drawScene(pet.isEgg() ? 0 : DEX_TBL[pet.speciesId].biome, millis(), gNight);
+  // Keep Explore, region, difficulty and encounter hit regions unchanged.
+  gbaBackdrop(gfx,GBA_WATER,GBA_MIST);
+  gbaRibbon(gfx,T(S_EXPLORE),132,29,202,43,GBA_BLUE,3);
 
-  gfx->fillRoundRect(78, 28, 310, 54, 14, UI_BG_DAY);
-  gfx->drawRoundRect(78, 28, 310, 54, 14, UI_INK);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(3);
-  gfx->setCursor(CX - (int)strlen(T(S_EXPLORE)) * 9, 44);
-  gfx->print(T(S_EXPLORE));
+  // A small original 16-bit landscape header connects this selector to the
+  // overworld while leaving the Pokemon-style menus readable in daylight.
+  gbaFrame(gfx,90,90,286,54,GBA_MIST,GBA_GREEN);
+  gfx->fillCircle(312,111,13,GBA_YELLOW);
+  gfx->fillTriangle(103,137,149,102,190,137,GBA_BLUE);
+  gfx->fillTriangle(152,137,199,111,240,137,GBA_TEAL);
+  gfx->fillTriangle(213,137,258,110,308,137,GBA_GREEN);
+  gfx->drawFastHLine(105,139,254,GBA_NAVY);
+  gbaP5Text(CX,149,"CHOOSE A REGION",2,GBA_TEAL);
 
-  drawMap(SPR_ICON_PLAY, 16, CX - 40, 88, 5, false);
-  const char *region = REGIONS[currentExploreRegion()].name;
-  gfx->fillRoundRect(EXPLORE_REGION_X, EXPLORE_REGION_Y, EXPLORE_REGION_W,
-                     EXPLORE_REGION_H, 16, UI_BG_DAY);
-  gfx->drawRoundRect(EXPLORE_REGION_X, EXPLORE_REGION_Y, EXPLORE_REGION_W,
-                     EXPLORE_REGION_H, 16, UI_INK);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(3);
-  gfx->setCursor(EXPLORE_REGION_X + 38, EXPLORE_REGION_Y + 29);
-  gfx->print("<");
-  gfx->setCursor(EXPLORE_REGION_X + EXPLORE_REGION_W - 56, EXPLORE_REGION_Y + 29);
-  gfx->print(">");
-  gfx->setTextSize(strlen(region) <= 10 ? 3 : 2);
-  int regionCharHalf = strlen(region) <= 10 ? 9 : 6;
-  gfx->setCursor(CX - (int)strlen(region) * regionCharHalf,
-                 EXPLORE_REGION_Y + (strlen(region) <= 10 ? 29 : 35));
-  gfx->print(region);
+  const char *region=REGIONS[currentExploreRegion()].name;
+  gbaFrame(gfx,EXPLORE_REGION_X,EXPLORE_REGION_Y,EXPLORE_REGION_W,
+           EXPLORE_REGION_H,GBA_CREAM,GBA_BLUE);
+  // These arrows occupy exactly the same button halves as before.
+  gfx->setTextColor(GBA_BLUE);gfx->setTextSize(3);
+  gfx->setCursor(EXPLORE_REGION_X+20,EXPLORE_REGION_Y+29);gfx->print("<");
+  gfx->setCursor(EXPLORE_REGION_X+EXPLORE_REGION_W-40,
+                 EXPLORE_REGION_Y+29);gfx->print(">");
+  const uint8_t regionSize=strlen(region)>12?1:2;
+  gbaP5Text(CX,EXPLORE_REGION_Y+32,region,regionSize);
+  gbaP5Text(CX,EXPLORE_REGION_Y+65,"WILD ENCOUNTERS",2,GBA_TEAL);
 
-  const char *dif = T(exploreHard ? S_HARD : S_EASY);
-  int dw = (int)strlen(dif) * 12 + 48;
-  if (dw < 140) dw = 140;
-  gfx->fillRoundRect(CX - dw / 2, EXPLORE_DIF_Y, dw, EXPLORE_DIF_H, 12,
-                     exploreHard ? UI_BAR_BAD : UI_TRACK);
-  gfx->setTextColor(exploreHard ? UI_BG_DAY : UI_INK);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(dif) * 6, EXPLORE_DIF_Y + 14);
-  gfx->print(dif);
+  const char *dif=T(exploreHard?S_HARD:S_EASY);
+  const uint16_t difColor=exploreHard?GBA_RED:GBA_GREEN;
+  const int dw=164;
+  gbaFrame(gfx,CX-dw/2,EXPLORE_DIF_Y,dw,EXPLORE_DIF_H,
+           exploreHard?GBA_CREAM:GBA_MIST,difColor);
+  gbaP5Text(CX,EXPLORE_DIF_Y+12,dif,2,GBA_NAVY);
 
-  bool live = !pet.isEgg() && pet.ceremony == CER_NONE;
-  gfx->fillRoundRect(EXPLORE_BTN_X, EXPLORE_BTN_Y, EXPLORE_BTN_W, EXPLORE_BTN_H,
-                     16, live ? UI_BAR_OK : UI_TRACK);
-  gfx->drawRoundRect(EXPLORE_BTN_X, EXPLORE_BTN_Y, EXPLORE_BTN_W, EXPLORE_BTN_H,
-                     16, live ? UI_INK : UI_INK_SOFT);
-  gfx->setTextColor(live ? UI_WHITE : UI_INK_SOFT);
-  gfx->setTextSize(3);
-  gfx->setCursor(CX - (int)strlen(T(S_EXPLORE)) * 9, EXPLORE_BTN_Y + 24);
-  gfx->print(T(S_EXPLORE));
+  const bool live=!pet.isEgg()&&pet.ceremony==CER_NONE;
+  gbaFrame(gfx,EXPLORE_BTN_X,EXPLORE_BTN_Y,EXPLORE_BTN_W,EXPLORE_BTN_H,
+           live?GBA_CREAM:GBA_PAPER,live?GBA_GREEN:GBA_DISABLED);
+  gbaP5Text(CX,EXPLORE_BTN_Y+15,live?"START ENCOUNTER":"NOT AVAILABLE",2,
+            live?GBA_NAVY:GBA_SHADOW);
+  gbaP5Text(CX,EXPLORE_BTN_Y+43,live?"TAP TO EXPLORE":"WAIT UNTIL READY",1,
+            live?GBA_TEAL:GBA_SHADOW);
   uiChrome();
   gfx->flush();
 }
@@ -3244,14 +3423,17 @@ void render() {
     drawPet();
     drawBath();
     drawPoops();
-    // panel inferior: base limpia para barras y botones sobre el paisaje
-    gfx->fillRect(0, 312, 466, 154, gNight ? UI_BG_NIGHT : UI_BG_DAY);
+    // Pixel-art care tray: the scenery remains visible above the control strip.
+    gfx->fillRect(0, 312, 466, 154, gNight ? GBA_NAVY : GBA_WATER);
+    gfx->fillRoundRect(74, 307, 318, 134, 13, GBA_NAVY);
+    gfx->fillRoundRect(77, 310, 312, 128, 11, gNight ? GBA_SHADOW : GBA_PAPER);
+    gfx->drawFastHLine(132, 318, 202, GBA_TEAL);
     drawBars();
     drawButtons();
     drawCelebration();
     if (pet.wantEvolveButton()) drawEvolveButton();        // CTA rojo: evolucionar
-    else if (pet.canRunawayNow()) drawRunawayButton();     // CTA sombrio: escapada (abandono)
-    else if (pet.wantFarewellButton()) drawFarewellButton();  // CTA dorado: despedida
+    else if (pet.canRunawayNow()) drawRunawayButton();     // genuine neglect warning
+    // Farewell is available in MAIN MENU, not permanently across the sprite.
   }
 
   if (pet.sleeping) {
@@ -3266,12 +3448,22 @@ void render() {
     if (millis() > feedMenuUntil) {
       feedMenuUntil = 0;
     } else {
-      gfx->fillRoundRect(FEED_MENU_X, FEED_MENU_Y, FEED_MENU_W, FEED_MENU_H, 14, UI_WHITE);
-      gfx->drawRoundRect(FEED_MENU_X, FEED_MENU_Y, FEED_MENU_W, FEED_MENU_H, 14, inkColor());
-      drawMap(SPR_ICON_FOOD, 16, FEED_MENU_X + 9, FEED_MENU_Y + 8, 3, false);
-      drawMap(SPR_ICON_BERRY_B, 16, FEED_MENU_X + 75, FEED_MENU_Y + 8, 3, false);
-      drawMap(SPR_ICON_BERRY_G, 16, FEED_MENU_X + 141, FEED_MENU_Y + 8, 3, false);
-      drawMap(SPR_ICON_CANDY, 16, FEED_MENU_X + 207, FEED_MENU_Y + 8, 3, false);
+      gbaFrame(gfx, FEED_MENU_X, FEED_MENU_Y, FEED_MENU_W, FEED_MENU_H,
+               GBA_CREAM, GBA_YELLOW);
+      static const char *const foodNames[4] = {"MEAL","BLUE","GREEN","TREAT"};
+      const char *const *foodIcons[4] = {
+        SPR_ICON_FOOD, SPR_ICON_BERRY_B, SPR_ICON_BERRY_G, SPR_ICON_CANDY
+      };
+      for (int i = 0; i < 4; ++i) {
+        const int x = FEED_MENU_X + i*(FEED_MENU_W/4);
+        gfx->fillRoundRect(x+5, FEED_MENU_Y+7, 56, 48, 4, GBA_WHITE);
+        gfx->drawRoundRect(x+5, FEED_MENU_Y+7, 56, 48, 4, GBA_TEAL);
+        drawMap(foodIcons[i], 16, x+17, FEED_MENU_Y+7, 2, false);
+        gfx->setTextColor(GBA_NAVY);
+        gfx->setTextSize(1);
+        gfx->setCursor(x+33-(int)strlen(foodNames[i])*3, FEED_MENU_Y+41);
+        gfx->print(foodNames[i]);
+      }
     }
   }
 
@@ -3468,9 +3660,11 @@ void renderSack() {
   // pantalla de resultado
   if (sackOverUntil) {
     if (now > sackOverUntil) { sackOpen = false; return; }
+    gbaFrame(gfx, 84, 124, 298, 192, GBA_CREAM, GBA_TEAL);
+    gbaRibbon(gfx, "TRAINING RESULT", 131, 110, 204, 35, GBA_BLUE, 1);
     char b[20];
     snprintf(b, sizeof(b), T(S_HITS_FMT), sackHits);
-    gfx->setTextColor(ink);
+    gfx->setTextColor(GBA_NAVY);
     gfx->setTextSize(4);
     gfx->setCursor(CX - strlen(b) * 12, 150);
     gfx->print(b);
@@ -3488,7 +3682,7 @@ void renderSack() {
     } else {
       char r[18];
       snprintf(r, sizeof(r), T(S_RECORD_FMT), pet.strHi);
-      gfx->setTextColor(ink);
+      gfx->setTextColor(GBA_NAVY);
       gfx->setCursor(CX - strlen(r) * 6, 256);
       gfx->print(r);
     }
@@ -3517,6 +3711,7 @@ void renderSack() {
   gfx->drawRoundRect(sx - 42, top, 84, 150, 26, ink);
   gfx->fillRect(sx - 42, top + 70, 84, 4, C565(0x7e, 0x28, 0x28));        // costura
 
+  gbaFrame(gfx, 150, 257, 166, 86, GBA_CREAM, GBA_RED);
   // contador de golpes
   char buf[8];
   snprintf(buf, sizeof(buf), "%u", sackHits);
@@ -3571,6 +3766,8 @@ void renderGame() {
       gameOpen = false;
       return;
     }
+    gbaFrame(gfx, 84, 124, 298, 192, GBA_CREAM, GBA_TEAL);
+    gbaRibbon(gfx, "TRAINING RESULT", 131, 110, 204, 35, GBA_BLUE, 1);
     char buf[22];
     snprintf(buf, sizeof(buf), T(S_SCORE_FMT), gameScore);
     gfx->setTextColor(ink);
@@ -3599,6 +3796,7 @@ void renderGame() {
 
   drawGameScene();
   stepGame();
+  gbaFrame(gfx, 168, 18, 130, 82, GBA_CREAM, GBA_YELLOW);
 
   // marcador, record y vidas
   char buf[8];
@@ -3717,11 +3915,11 @@ void applyClock() {
 }
 
 void drawClockBtn(int x, int y, const char *l) {
-  gfx->fillRoundRect(x, y, 58, 58, 12, UI_WHITE);
-  gfx->drawRoundRect(x, y, 58, 58, 12, UI_INK);
-  gfx->setTextColor(UI_INK);
+  // The touch rectangle remains exactly 58x58; the paint uses a GBA border.
+  gbaFrame(gfx, x, y, 58, 58, GBA_CREAM, GBA_BLUE);
+  gfx->setTextColor(GBA_NAVY);
   gfx->setTextSize(4);
-  gfx->setCursor(x + 17, y + 15);
+  gfx->setCursor(x + (58 - (int)strlen(l) * 24) / 2, y + 13);
   gfx->print(l);
 }
 
@@ -3738,91 +3936,89 @@ void drawClockBtn(int x, int y, const char *l) {
 static const char *const LANG_CODES[LANG_COUNT] = { "ES", "EN", "FR", "DE", "IT", "PT" };
 
 void renderClock() {
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(3);
-  gfx->setCursor(CX - strlen(T(S_SET_TIME)) * 9, 44);
-  gfx->print(T(S_SET_TIME));
-
+  // GBA-style clock/settings panel. The existing touch hitboxes are unchanged.
+  gbaBackdrop(gfx, GBA_WATER, GBA_MIST);
+  gbaRibbon(gfx, T(S_SET_TIME), 105, 32, 256, 44, GBA_BLUE, 2);
+  gbaFrame(gfx, 84, 93, 298, 80, GBA_CREAM, GBA_YELLOW);
   char t[8];
   snprintf(t, sizeof(t), "%02d:%02d", clockH, clockM);
-  gfx->setTextSize(7);
-  gfx->setCursor(CX - 105, 108);
+  gfx->setTextSize(6);
+  gfx->setTextColor(GBA_NAVY);
+  gfx->setCursor(CX - (int)strlen(t) * 18, 107);
   gfx->print(t);
 
-  drawClockBtn(104, 190, "-");  // hora -
-  drawClockBtn(170, 190, "+");  // hora +
-  drawClockBtn(252, 190, "-");  // min -
-  drawClockBtn(318, 190, "+");  // min +
+  // HOUR and MINUTE controls still occupy the original y=190..248 row.
+  gbaFrame(gfx, 82, 181, 302, 104, GBA_PAPER, GBA_TEAL);
+  drawClockBtn(104, 190, "-");
+  drawClockBtn(170, 190, "+");
+  drawClockBtn(252, 190, "-");
+  drawClockBtn(318, 190, "+");
   gfx->setTextSize(2);
-  gfx->setTextColor(UI_INK_SOFT);
-  gfx->setCursor(120, 256);
-  gfx->print(T(S_HOUR));
-  gfx->setCursor(276, 256);
-  gfx->print(T(S_MIN));
+  gfx->setTextColor(GBA_NAVY);
+  const char *hour = T(S_HOUR), *min = T(S_MIN);
+  gfx->setCursor(166 - (int)strlen(hour) * 6, 258);
+  gfx->print(hour);
+  gfx->setCursor(314 - (int)strlen(min) * 6, 258);
+  gfx->print(min);
 
-  // interruptor de sonido (izquierda de la fila de idioma)
-  bool snd = audioEnabled();
+  // Sound / volume / language stay in their original touch regions.
+  gfx->setTextColor(GBA_SHADOW);
+  gfx->setTextSize(1);
+  gfx->setCursor(66, 286); gfx->print("SOUND");
+  gfx->setCursor(206, 286); gfx->print("VOLUME");
+  gfx->setCursor(350, 286); gfx->print("LANG");
+  const bool snd = audioEnabled();
   const char *sl = snd ? T(S_SND_ON) : T(S_SND_OFF);
-  gfx->fillRoundRect(34, LANG_PILL_Y, 96, LANG_PILL_H, 8, snd ? UI_BAR_OK : UI_WHITE);
-  gfx->drawRoundRect(34, LANG_PILL_Y, 96, LANG_PILL_H, 8, UI_INK);
-  gfx->setTextColor(snd ? UI_BG_DAY : UI_INK);
-  gfx->setTextSize(2);
-  gfx->setCursor(34 + (96 - (int)strlen(sl) * 12) / 2, LANG_PILL_Y + 8);
+  gbaFrame(gfx, 34, LANG_PILL_Y, 96, LANG_PILL_H,
+           snd ? GBA_GREEN : GBA_CREAM, snd ? GBA_TEAL : GBA_SHADOW);
+  uint8_t sndSize = strlen(sl) > 7 ? 1 : 2;
+  gfx->setTextColor(snd ? GBA_WHITE : GBA_NAVY);
+  gfx->setTextSize(sndSize);
+  gfx->setCursor(82 - (int)strlen(sl) * 3 * sndSize,
+                 LANG_PILL_Y + (LANG_PILL_H - 8 * sndSize) / 2);
   gfx->print(sl);
 
-  // volume: a level, not a toggle. The sound switch beside it is still the
-  // master -- this is how loud it is when it is on, and 0 is silent.
-  {
-    uint8_t v = audioVolume();
-    for (int i = 0; i < 2; i++) {
-      int bx = i ? VOL_PLUS_X : VOL_MINUS_X;
-      bool live = i ? (v < 10) : (v > 0);
-      gfx->fillRoundRect(bx, LANG_PILL_Y, VOL_BTN_W, LANG_PILL_H, 8,
-                         live ? UI_WHITE : UI_TRACK);
-      gfx->drawRoundRect(bx, LANG_PILL_Y, VOL_BTN_W, LANG_PILL_H, 8, UI_INK);
-      gfx->setTextColor(live ? UI_INK : 0x8410);
-      gfx->setTextSize(2);
-      gfx->setCursor(bx + VOL_BTN_W / 2 - 6, LANG_PILL_Y + 8);
-      gfx->print(i ? "+" : "-");
-    }
-    char vl[12];
-    snprintf(vl, sizeof(vl), T(S_VOL_FMT), v);
-    gfx->setTextColor(v ? UI_INK : UI_TRACK);
-    gfx->setTextSize(1);
-    gfx->setCursor(210 + (56 - (int)strlen(vl) * 6) / 2, LANG_PILL_Y + 4);
-    gfx->print(vl);
-    // a small bar under the number, so the level reads at a glance
-    gfx->fillRoundRect(210, LANG_PILL_Y + 18, 56, 8, 3, UI_TRACK);
-    if (v) gfx->fillRoundRect(210, LANG_PILL_Y + 18, 56 * v / 10, 8, 3, UI_BAR_OK);
+  const uint8_t v = audioVolume();
+  for (int i = 0; i < 2; ++i) {
+    int bx = i ? VOL_PLUS_X : VOL_MINUS_X;
+    bool live = i ? v < 10 : v > 0;
+    gbaFrame(gfx, bx, LANG_PILL_Y, VOL_BTN_W, LANG_PILL_H,
+             live ? GBA_CREAM : GBA_DISABLED, GBA_TEAL);
+    gfx->setTextColor(live ? GBA_NAVY : GBA_SHADOW);
+    gfx->setTextSize(2);
+    gfx->setCursor(bx + VOL_BTN_W / 2 - 6, LANG_PILL_Y + 7);
+    gfx->print(i ? "+" : "-");
   }
+  char vl[12];
+  snprintf(vl, sizeof(vl), T(S_VOL_FMT), v);
+  gfx->setTextColor(GBA_NAVY);
+  gfx->setTextSize(1);
+  gfx->setCursor(238 - (int)strlen(vl) * 3, LANG_PILL_Y + 3);
+  gfx->print(vl);
+  gfx->fillRoundRect(210, LANG_PILL_Y + 20, 56, 7, 2, GBA_DISABLED);
+  if (v) gfx->fillRoundRect(210, LANG_PILL_Y + 20, 56 * v / 10, 7, 2, GBA_GREEN);
 
-  // selector de idioma: una pildora que cicla los 6 idiomas al tocar
-  gfx->fillRoundRect(LANG_PILL_X, LANG_PILL_Y, LANG_PILL_W, LANG_PILL_H, 8, UI_WHITE);
-  gfx->drawRoundRect(LANG_PILL_X, LANG_PILL_Y, LANG_PILL_W, LANG_PILL_H, 8, UI_INK);
+  gbaFrame(gfx, LANG_PILL_X, LANG_PILL_Y, LANG_PILL_W, LANG_PILL_H,
+           GBA_CREAM, GBA_PURPLE);
   char lp[10];
   snprintf(lp, sizeof(lp), "%s >", LANG_CODES[gLang]);
-  gfx->setTextColor(UI_INK);
+  gfx->setTextColor(GBA_NAVY);
   gfx->setTextSize(2);
-  gfx->setCursor(LANG_PILL_X + (LANG_PILL_W - (int)strlen(lp) * 12) / 2, LANG_PILL_Y + 8);
+  gfx->setCursor(LANG_PILL_X + (LANG_PILL_W - (int)strlen(lp) * 12) / 2,
+                 LANG_PILL_Y + 7);
   gfx->print(lp);
 
-  gfx->fillRoundRect(133, 340, 200, 48, 14, UI_BAR_OK);
-  gfx->setTextColor(UI_BG_DAY);
-  gfx->setTextSize(3);
-  gfx->setCursor(CX - 18, 352);
-  gfx->print("OK");
-
-  gfx->setTextColor(UI_INK_SOFT);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - strlen(T(S_CLOCK_CANCEL)) * 6, 410);
-  gfx->print(T(S_CLOCK_CANCEL));
-
-  // version del firmware (discreta, abajo del todo)
-  char ver[20];
-  snprintf(ver, sizeof(ver), "TamaPoke v%s", FW_VERSION);
+  gbaRibbon(gfx, "OK", 133, 340, 200, 48, GBA_GREEN, 3);
+  // Cancel is a vertical back gesture, so this is a visual cue, not a new
+  // untapped on-screen control.
+  gfx->setTextColor(GBA_NAVY);
   gfx->setTextSize(1);
+  const char *cancel = T(S_CLOCK_CANCEL);
+  gfx->setCursor(CX - (int)strlen(cancel) * 3, 409);
+  gfx->print(cancel);
+  char ver[26];
+  snprintf(ver, sizeof(ver), "TamaPoke v%s", FW_VERSION);
+  gfx->setTextColor(GBA_SHADOW);
   gfx->setCursor(CX - (int)strlen(ver) * 3, 436);
   gfx->print(ver);
   gfx->flush();
@@ -3920,83 +4116,120 @@ void drawMedalBadge(int x, int y, int i) {
 void renderCardProfile() {
   const DexEntry &d = DEX_TBL[pet.speciesId];
   const char *nm = pet.nick[0] ? pet.nick : d.name;
-  char head[26];
-  snprintf(head, sizeof(head), T(S_NAME_FMT), pet.shiny ? "*" : "", nm, pet.level());
-  gfx->setTextColor(d.accent);
-  // auto-encoge: a tamano 3 los nombres largos no caben en la franja estrecha de
-  // arriba de la pantalla redonda, asi que se cortaban por el borde
-  int hlen = strlen(head);
-  int hts = (hlen <= 11) ? 3 : 2;
-  gfx->setTextSize(hts);
-  gfx->setCursor(CX - hlen * (hts == 3 ? 9 : 6), hts == 3 ? 34 : 40);
-  gfx->print(head);
-  if (pet.nick[0]) {  // especie real bajo el apodo
-    gfx->setTextColor(UI_INK_SOFT);
-    gfx->setTextSize(2);
-    gfx->setCursor(CX - (strlen(d.name) + 2) * 6, 64);
-    gfx->printf("(%s)", d.name);
+  char head[34];
+  snprintf(head, sizeof(head), "%s%s  LV.%u", pet.shiny ? "*" : "",
+           nm, (unsigned)pet.level());
+  const uint8_t titleSize = strlen(head) > 21 ? 1 : 2;
+  gbaRibbon(gfx, head, 81, 31, 304, 44, GBA_BLUE, titleSize);
+  if (pet.nick[0]) {
+    char species[36];
+    snprintf(species, sizeof(species), "(%s)", d.name);
+    gfx->setTextColor(GBA_NAVY);
+    gfx->setTextSize(1);
+    gfx->setCursor(CX - (int)strlen(species) * 3, 82);
+    gfx->print(species);
+  }
+  // Preserve the large animated sprite and the header's tap-to-rename region.
+  gbaFrame(gfx, 111, 99, 244, 150, GBA_CREAM, GBA_TEAL);
+  if (pmd.loaded) drawPmdAct(PMD_IDLE, CX, 204, millis(), true, false, 4);
+  else {
+    const uint8_t *t = thumbs.get(pet.speciesId);
+    if (t) drawThumb(t, CX-40, 124, 2, false);
   }
 
-  // retrato grande animado
-  if (pmd.loaded) drawPmdAct(PMD_IDLE, CX, 206, millis(), true, false, 4);
-
-  // racha con llama
-  int sx = 138, sy = 224;
-  gfx->fillTriangle(sx + 8, sy, sx + 1, sy + 18, sx + 15, sy + 18, UI_BAR_BAD);
-  gfx->fillTriangle(sx + 8, sy + 7, sx + 4, sy + 18, sx + 12, sy + 18, UI_BAR_WARN);
-  char rl[30];
-  snprintf(rl, sizeof(rl), T(S_STREAK_FMT), pet.streak, pet.bestStreak);
-  gfx->setTextColor(UI_INK);
+  gbaFrame(gfx, 76, 259, 314, 54, GBA_WHITE, GBA_GREEN);
+  gfx->setTextColor(GBA_NAVY);
   gfx->setTextSize(2);
-  gfx->setCursor(sx + 24, sy + 2);
-  gfx->print(rl);
+  gfx->setCursor(91, 273);
+  gfx->print("BOND");
+  char bond[12]; snprintf(bond, sizeof(bond), "%u", (unsigned)pet.bond);
+  gfx->setCursor(343, 273);
+  gfx->print(bond);
+  gfx->fillRoundRect(167, 279, 157, 12, 3, GBA_NAVY);
+  gfx->fillRoundRect(169, 281, 153, 8, 2, GBA_PAPER);
+  if (pet.bond) gfx->fillRoundRect(169, 281, 153*(unsigned)pet.bond/100, 8, 2, GBA_GREEN);
 
-  drawCardStat(258, T(S_VIN), pet.bond, 100, C565(0xd4, 0x52, 0x7e), IV_NONE);
-
+  gbaFrame(gfx, 91, 320, 284, 48, GBA_CREAM, GBA_YELLOW);
+  char details[48];
+  snprintf(details, sizeof(details), "STREAK %u  BEST %u", (unsigned)pet.streak, (unsigned)pet.bestStreak);
+  gfx->setTextColor(GBA_NAVY);
+  gfx->setTextSize(2);
+  gfx->setCursor(CX - (int)strlen(details)*6, 330);
+  gfx->print(details);
   const char *berry = !pet.berryKnown ? T(S_BERRY_UNK)
-                      : pet.lovesBerry(0) ? T(S_BERRY_RED)
-                      : pet.lovesBerry(1) ? T(S_BERRY_BLUE)
-                                          : T(S_BERRY_GREEN);
-  char info[40];
+                     : pet.lovesBerry(0) ? T(S_BERRY_RED)
+                     : pet.lovesBerry(1) ? T(S_BERRY_BLUE) : T(S_BERRY_GREEN);
+  char info[48];
   snprintf(info, sizeof(info), T(S_INFO_FMT), berry,
            (unsigned long)(pet.ageMinutes / 1440));
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - strlen(info) * 6, 296);
+  gfx->setTextColor(GBA_NAVY);
+  gfx->setTextSize(1);
+  gfx->setCursor(CX - (int)strlen(info)*3, 351);
   gfx->print(info);
-
-  gfx->setTextColor(UI_INK_SOFT);
-  gfx->setCursor(CX - strlen(T(S_RENAME_HINT)) * 6, 332);
-  gfx->print(T(S_RENAME_HINT));
 }
 
 // pagina 1: combate (4 barras + boton de entrenar)
-void renderCardStats() {
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(3);
-  gfx->setCursor(CX - strlen(T(S_BATTLE)) * 9, 44);
-  gfx->print(T(S_BATTLE));
+// Compact GBA-style stat row; unlike drawCardStat(), this is confined to the
+// battle-stats page so Profile, Bond and Progress retain their old geometry.
+void gbaBattleStat(int y, const char *label, uint16_t val, uint16_t maxBar,
+                   uint16_t color, uint8_t iv) {
+  gfx->fillRoundRect(74, y, 318, 34, 5, GBA_NAVY);
+  gfx->fillRoundRect(76, y + 2, 314, 30, 4, GBA_CREAM);
+  gfx->fillRect(80, y + 5, 7, 24, color);
+  gfx->setTextSize(2);
+  gfx->setTextColor(GBA_NAVY);
+  gfx->setCursor(92, y + 9);
+  gfx->print(label);
 
-  // typing, in the accent colour of the species (English in every language,
-  // same as the species names themselves)
+  const int bx = 171, by = y + 10, bw = 106;
+  gfx->fillRect(bx, by, bw, 14, GBA_SHADOW);
+  gfx->fillRect(bx + 2, by + 2, bw - 4, 10, GBA_WHITE);
+  int fill = maxBar ? (int)((uint32_t)val * (bw - 4) / maxBar) : 0;
+  if (fill > bw - 4) fill = bw - 4;
+  if (fill > 0) gfx->fillRect(bx + 2, by + 2, fill, 10, color);
+  gfx->setTextSize(2);
+  gfx->setCursor(288, y + 9);
+  gfx->printf("%u", (unsigned)val);
+  if (iv != IV_NONE) {
+    char ivLabel[12];
+    snprintf(ivLabel, sizeof(ivLabel), T(S_IV_FMT), iv);
+    gfx->setTextSize(1);
+    gfx->setTextColor(iv == 31 ? GBA_RED : GBA_NAVY);
+    gfx->setCursor(348, y + 13);
+    gfx->print(ivLabel);
+  }
+}
+
+// Pokemon summary: title ribbon, typed chip and five framed stat rows.
+void renderCardStats() {
+  gbaBackdrop(gfx, GBA_WATER, GBA_MIST);
+  gbaRibbon(gfx, T(S_STATS), 130, 28, 206, 42, GBA_BLUE, 3);
   const DexEntry &de = DEX_TBL[pet.speciesId];
-  char ty[24];
+  char ty[32];
   if (de.type2 == T_NONE) snprintf(ty, sizeof(ty), "%s", typeName(de.type1));
   else snprintf(ty, sizeof(ty), "%s/%s", typeName(de.type1), typeName(de.type2));
-  gfx->setTextColor(de.accent);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(ty) * 6, 76);
+  gfx->fillRoundRect(123, 77, 220, 22, 6, GBA_NAVY);
+  gfx->fillRoundRect(125, 79, 216, 18, 5, GBA_CREAM);
+  const int ts = (strlen(ty) > 13) ? 1 : 2;
+  gfx->setTextSize(ts);
+  gfx->setTextColor(GBA_NAVY);
+  gfx->setCursor(CX - (int)strlen(ty) * 3 * ts, 80 + (2-ts)*4);
   gfx->print(ty);
 
-  // 360 de tope de barra: a nivel 73 (fin de ciclo) el stat mas alto de toda
-  // la dex es la vitalidad de CHANSEY (355). El 260 anterior ya se desbordaba.
-  drawCardStat(104, T(S_STAT_ATK), pet.atkStat(), 360, UI_BAR_BAD, pet.ivAtk);
-  drawCardStat(144, T(S_STAT_DEF), pet.defStat(), 360, 0x4C98, pet.ivDef);
-  drawCardStat(184, T(S_STAT_SPE), pet.speStat(), 360, UI_BAR_WARN, pet.ivSpe);
-  drawCardStat(224, T(S_STAT_VIT), pet.vitStat(), 360, UI_BAR_OK, pet.ivHp);
-  drawCardStat(264, T(S_STAT_WGT), pet.weight, 100, 0xB3C8, IV_NONE);
+  gbaFrame(gfx, 62, 100, 342, 208, GBA_PAPER, GBA_BLUE);
+  gbaBattleStat(108, T(S_STAT_ATK), pet.atkStat(), 360, GBA_RED, pet.ivAtk);
+  gbaBattleStat(148, T(S_STAT_DEF), pet.defStat(), 360, GBA_BLUE, pet.ivDef);
+  gbaBattleStat(188, T(S_STAT_SPE), pet.speStat(), 360, GBA_YELLOW, pet.ivSpe);
+  gbaBattleStat(228, T(S_STAT_VIT), pet.vitStat(), 360, GBA_GREEN, pet.ivHp);
+  gbaBattleStat(268, T(S_STAT_WGT), pet.weight, 100, GBA_PURPLE, IV_NONE);
 
+  char footer[40];
+  const char *name = pet.nick[0] ? pet.nick : de.name;
+  snprintf(footer, sizeof(footer), "%s  Lv.%u", name, (unsigned)pet.level());
+  gbaRibbon(gfx, footer, 105, 322, 256, 34, GBA_TEAL,
+            strlen(footer) > 18 ? 1 : 2);
 }
+
 
 // Draws one move as a row: name, its type in the type's own colour, and either
 // power or a STATUS marker. Shared by the moves page and the picker so a move
@@ -4015,10 +4248,11 @@ int drawTypeChip(int x, int y, uint8_t type) {
 }
 
 void drawMoveRow(int y, uint8_t mv, bool highlight, int16_t dex) {
-  gfx->fillRoundRect(70, y, 326, 50, 12, highlight ? UI_BAR_WARN : UI_BG_DAY);
-  gfx->drawRoundRect(70, y, 326, 50, 12, UI_INK);
+  // Shared by move summary and move-picker. Keep 70..396 x y..y+50.
+  gbaFrame(gfx, 70, y, 326, 50, highlight ? GBA_YELLOW : GBA_CREAM,
+           highlight ? GBA_RED : GBA_TEAL);
   if (!mv) {
-    gfx->setTextColor(UI_INK_SOFT);
+    gfx->setTextColor(GBA_SHADOW);
     gfx->setTextSize(2);
     gfx->setCursor(CX - (int)strlen(T(S_MOVE_EMPTY)) * 6, y + 17);
     gfx->print(T(S_MOVE_EMPTY));
@@ -4026,17 +4260,10 @@ void drawMoveRow(int y, uint8_t mv, bool highlight, int16_t dex) {
   }
   const MoveEntry &m = MOVE_TBL[mv];
   const char *name = moveName(mv);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(2);
+  gfx->setTextColor(GBA_NAVY);
+  gfx->setTextSize(strlen(name) > 24 ? 1 : 2);
   gfx->setCursor(82, y + 8);
   gfx->print(name);
-  // There is no per-type palette (DexEntry.accent is per species), and inventing
-  // one by hand would duplicate what gen_dex.py generates. Colouring same-type
-  // moves in the species accent is more useful anyway: STAB is a 1.5x damage
-  // bonus, so this marks the moves that actually hit hardest for this creature.
-  // The chip carries the TYPE; STAB moved onto the power figure, where it
-  // belongs -- STAB is a damage bonus, so saying it next to the damage reads
-  // straight, and it leaves the type free to be its own colour.
   bool stab = hasStab(dex, m.type) && m.cat != MC_STATUS;
   int cw = drawTypeChip(82, y + 29, m.type);
   if (stab) {
@@ -4048,7 +4275,7 @@ void drawMoveRow(int y, uint8_t mv, bool highlight, int16_t dex) {
   char pw[16];
   if (m.cat == MC_STATUS) snprintf(pw, sizeof(pw), "%s", T(S_MOVE_STATUS));
   else snprintf(pw, sizeof(pw), T(S_MOVE_PWR), m.power);
-  gfx->setTextColor(stab ? DEX_TBL[dex].accent : UI_INK);
+  gfx->setTextColor(stab ? DEX_TBL[dex].accent : GBA_NAVY);
   gfx->setTextSize(1);
   gfx->setCursor(384 - (int)strlen(pw) * 6, y + 33);
   gfx->print(pw);
@@ -4056,14 +4283,12 @@ void drawMoveRow(int y, uint8_t mv, bool highlight, int16_t dex) {
 
 // card page 4: the four known moves. Tapping a slot opens the picker.
 void renderCardMoves() {
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(3);
-  gfx->setCursor(CX - strlen(T(S_MOVES)) * 9, 44);
-  gfx->print(T(S_MOVES));
-  for (int i = 0; i < MOVE_SLOTS; i++) drawMoveRow(MOVE_ROW_Y(i), pet.moves[i], false, pet.speciesId);
-  gfx->setTextColor(UI_INK_SOFT);
+  gbaRibbon(gfx, T(S_MOVES), 129, 31, 208, 41, GBA_BLUE, 2);
+  for (int i = 0; i < MOVE_SLOTS; i++)
+    drawMoveRow(MOVE_ROW_Y(i), pet.moves[i], false, pet.speciesId);
+  gfx->setTextColor(GBA_NAVY);
   gfx->setTextSize(1);
-  gfx->setCursor(CX - (int)strlen(T(S_MOVE_TAP)) * 3, 340);
+  gfx->setCursor(CX - (int)strlen(T(S_MOVE_TAP)) * 3, 347);
   gfx->print(T(S_MOVE_TAP));
 }
 
@@ -4115,19 +4340,13 @@ void renderMovePick() {
 
   uint8_t all[64];
   uint8_t n = learnableList(all, sizeof(all));
-  uint8_t pages = n ? (n + MOVE_PICK_PER_PAGE - 1) / MOVE_PICK_PER_PAGE : 1;
-  if (movePickPage >= pages) movePickPage = 0;
-  for (uint8_t i = 0; i < MOVE_PICK_PER_PAGE; i++) {
-    uint8_t idx = movePickPage * MOVE_PICK_PER_PAGE + i;
-    if (idx >= n) break;
-    // the move already in this slot is highlighted, so replacing like for like
-    // is obvious rather than a guess
-    drawMoveRow(MOVE_PICK_Y(i), all[idx], all[idx] == pickTargetMoves()[movePickSlot], pickTargetDex());
+  moveScroll=(int16_t)uiListClamp(moveScroll);
+  for(uint8_t idx=0;idx<n;idx++) {
+    int y=MOVE_PICK_Y(idx)-moveScroll;
+    if(y<76||y+50>366)continue;
+    drawMoveRow(y,all[idx],all[idx]==pickTargetMoves()[movePickSlot],pickTargetDex());
   }
-  for (uint8_t i = 0; i < pages && pages > 1; i++) {
-    if (i == movePickPage) gfx->fillCircle(CX - (pages - 1) * 13 + i * 26, 380, 5, UI_INK);
-    else gfx->drawCircle(CX - (pages - 1) * 13 + i * 26, 380, 4, UI_INK);
-  }
+  uiListDrawBar(76,366,n,58,moveScroll);
   gfx->setTextColor(UI_INK_SOFT);
   gfx->setTextSize(2);
   gfx->setCursor(CX - strlen(T(S_BACK)) * 6, 402);
@@ -4300,9 +4519,11 @@ void startLinkBattle() {
   btlFoe = btlFoeSquad[0];
   btlMyAct = 0;
   btlMsgCount = 0;
+  btlItemTurnPending = false;
   btlOver = false;
   btlWon = false;
   btlMenu = 0;
+  btlBagPage = 0;  // a new battle must not inherit a previous bag page
   btlWinUntil = 0;
   btlSwapWho = -1;
   lanWaitSince = 0;      // a rematch reuses this screen; the old wait is over
@@ -4336,9 +4557,11 @@ void startTrainerBattle(uint8_t idx, bool hard) {
   btlFoeAt = 0;
   foeFromSpecies(btlFoe, tr.team[0].dex, tr.team[0].level, hard ? HARD_IV : EASY_IV);
   btlMsgCount = 0;
+  btlItemTurnPending = false;
   btlOver = false;
   btlWon = false;
   btlMenu = 0;
+  btlBagPage = 0;  // a new battle must not inherit a previous bag page
   btlWinUntil = 0;
   btlSwapWho = -1;
   btlFaintUntil[0] = btlFaintUntil[1] = 0;
@@ -4369,9 +4592,11 @@ void startBattle(int16_t dex, uint8_t lvl) {
   combatantFromPet(btlFoe, foe);
   btlWild = false;
   btlMsgCount = 0;
+  btlItemTurnPending = false;
   btlOver = false;
   btlWon = false;
   btlMenu = 0;
+  btlBagPage = 0;  // a new battle must not inherit a previous bag page
   btlWinUntil = 0;
   btlSwapWho = -1;
   btlFaintUntil[0] = btlFaintUntil[1] = 0;
@@ -4561,8 +4786,10 @@ static void btlThrowBall(ItemKey k) {
   btlResolve(0);   // move 0 = no attack, so only the foe acts
 }
 
-// A potion or a full heal, on whichever creature is out. It works on the
-// Combatant, so like every ailment it is battle-only and is never written back.
+// Potion and cure items affect the currently deployed Combatant. Battle HP
+// remains transient: creatures start each new battle at full HP by design.
+// Display the heal before the enemy responds; resolving in the same frame made
+// a successful Potion look broken when the enemy immediately removed the HP.
 static void btlUseItem(ItemKey k) {
   const ItemEntry &e = itemEntry(k);
   bool useful = (e.category == IC_HEAL) ? btlYou.hp < btlYou.maxHp
@@ -4570,9 +4797,14 @@ static void btlUseItem(ItemKey k) {
               : false;
   if (!useful) { sfxPlay(SFX_DENY); btlSay("%s", T(S_ITEM_NOUSE)); btlMenu = 0; return; }
   if (!bag.consume(k)) { sfxPlay(SFX_DENY); return; }
+  uint16_t restored=0;
   if (e.category == IC_HEAL) {
+    const uint16_t before=btlYou.hp;
     uint32_t hp = (uint32_t)btlYou.hp + (uint16_t)e.param;
     btlYou.hp = hp > btlYou.maxHp ? btlYou.maxHp : (uint16_t)hp;
+    restored=btlYou.hp-before;
+    // The player must see the result before the foe's next attack.
+    btlHpShown[0]=btlYou.hp;
   } else {
     btlYou.ailment = AIL_NONE;
     btlYou.ailTurns = 0;
@@ -4581,7 +4813,8 @@ static void btlUseItem(ItemKey k) {
   btlMenu = 0;
   sfxPlay(SFX_TAP);
   btlSay(T(S_ITEM_USED), e.name);
-  btlResolve(0);   // using an item costs the turn, as it does in the real games
+  if(e.category==IC_HEAL) btlSay("HP +%u",(unsigned)restored);
+  btlItemTurnPending=true;  // enemy moves only after the player acknowledges
 }
 
 // One exchange: both sides act in speed order, then burn/poison chip.
@@ -4721,44 +4954,46 @@ static void btlResolve(uint8_t yourMove) {
   }
 }
 
+// GBA-style HP plates: fixed dimensions so long names and level text never
+// collide with the opponent sprite, even at level 100.
 static void btlHpBar(int x, int y, int w, const Combatant &c, uint16_t shown) {
-  int fw = c.maxHp ? (w - 4) * shown / c.maxHp : 0;
-  uint16_t col = (shown * 2 > c.maxHp) ? UI_BAR_OK
-                 : (shown * 4 > c.maxHp) ? UI_BAR_WARN : UI_BAR_BAD;
-  gfx->fillRoundRect(x, y, w, 14, 4, UI_TRACK);
-  if (fw > 0) gfx->fillRoundRect(x + 2, y + 2, fw, 10, 3, col);
-  gfx->drawRoundRect(x, y, w, 14, 4, UI_INK);
+  const int fill=c.maxHp?(w-6)*shown/c.maxHp:0;
+  uint16_t col=(shown*2>c.maxHp)?GBA_GREEN:
+               (shown*4>c.maxHp)?GBA_YELLOW:GBA_RED;
+  gfx->fillRoundRect(x,y,w,13,3,GBA_NAVY);
+  gfx->fillRect(x+2,y+2,w-4,9,GBA_PAPER);
+  if(fill>0)gfx->fillRect(x+3,y+3,fill,7,col);
+  gfx->drawRoundRect(x,y,w,13,3,GBA_NAVY);
 }
 
 static void btlSide(int tx, int ty, int sx, int sy, const Combatant &c, uint8_t who) {
-  // the scenes are busy, so the name and bar sit on their own plate rather
-  // than fighting the artwork for contrast
-  int ph = (who == 0) ? 54 : 40;
-  gfx->fillRoundRect(tx - 8, ty - 8, 158, ph, 8, UI_BG_DAY);
-  gfx->drawRoundRect(tx - 8, ty - 8, 158, ph, 8, UI_INK);
-  char l[28];
-  snprintf(l, sizeof(l), "%s Lv.%u", c.name, c.level);
-  gfx->setTextColor(UI_INK);
+  // Keep all battle HP inside two compact, GBA-style information plates.
+  const int px=tx-10,py=ty-8,pw=192,ph=72;
+  gbaFrame(gfx,px,py,pw,ph,GBA_CREAM,who?GBA_TEAL:GBA_BLUE);
+  gfx->fillRect(px+6,py+7,5,ph-14,who?GBA_TEAL:GBA_BLUE);
+  // The Pokémon name gets the large font; level goes on a separate line.
+  const uint8_t ns=strlen(c.name)>12?1:2;
+  gfx->setTextColor(GBA_NAVY);
+  gfx->setTextSize(ns);
+  gfx->setCursor(px+16,py+8);gfx->print(c.name);
+  char lv[16];snprintf(lv,sizeof(lv),"Lv.%u",(unsigned)c.level);
   gfx->setTextSize(1);
-  gfx->setCursor(tx, ty);
-  gfx->print(l);
-  gfx->setTextColor(UI_BAR_WARN);
-  gfx->setCursor(tx, ty + 14);
-  gfx->print("HP");
-  btlHpBar(tx + 18, ty + 12, 122, c, btlHpShown[who]);
-  if (who == 0) {                 // your own numbers, as the games do
-    char hp[16];
-    snprintf(hp, sizeof(hp), "%u/%u", btlHpShown[who], c.maxHp);
-    gfx->setTextColor(UI_INK);
-    gfx->setCursor(tx + 140 - (int)strlen(hp) * 6, ty + 28);
-    gfx->print(hp);
+  gfx->setCursor(px+pw-12-(int)strlen(lv)*6,py+29);gfx->print(lv);
+  gfx->setTextColor(GBA_YELLOW);
+  gfx->setCursor(px+16,py+30);gfx->print("HP");
+  btlHpBar(px+38,py+28,94,c,btlHpShown[who]);
+  if (who==0) {
+    char hp[18];snprintf(hp,sizeof(hp),"%u/%u",(unsigned)btlHpShown[who],(unsigned)c.maxHp);
+    gfx->setTextColor(GBA_NAVY);
+    gfx->setTextSize(1);
+    gfx->setCursor(px+pw-12-(int)strlen(hp)*6,py+48);gfx->print(hp);
   }
-  if (c.ailment != AIL_NONE) {   // a status is the thing you most need to see
-    static const StrId AIL_STR[] = { S_AIL_PARA, S_AIL_PARA, S_AIL_BURN, S_AIL_POISON,
-                                     S_AIL_SLEEP, S_AIL_FREEZE, S_AIL_CONFUSE };
-    gfx->setTextColor(UI_BAR_BAD);
-    gfx->setCursor(tx + 18, ty + 28);
-    gfx->print(T(AIL_STR[c.ailment]));
+  if (c.ailment != AIL_NONE) {
+    static const StrId AIL_STR[]={S_AIL_PARA,S_AIL_PARA,S_AIL_BURN,S_AIL_POISON,
+                                  S_AIL_SLEEP,S_AIL_FREEZE,S_AIL_CONFUSE};
+    gfx->setTextColor(GBA_RED);
+    gfx->setTextSize(1);
+    gfx->setCursor(px+16,py+49);gfx->print(T(AIL_STR[c.ailment]));
   }
   // a platform under each creature, so they stand in the scene rather than
   // floating over it
@@ -4825,13 +5060,9 @@ static void btlEaseBars() {
 // message box as "It's super effective!", with the badge awarded silently.
 void renderWin() {
   const Trainer &t = BTL_TRAINERS[btlTrainer];
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
-
-  gfx->setTextColor(UI_BAR_WARN);
-  gfx->setTextSize(3);
-  gfx->setCursor(CX - strlen(T(S_BTL_WIN)) * 9, 54);
-  gfx->print(T(S_BTL_WIN));
+  gbaBackdrop(gfx,GBA_WATER,GBA_MIST);
+  gbaFrame(gfx,75,86,316,284,GBA_CREAM,GBA_YELLOW);
+  gbaRibbon(gfx,T(S_BTL_WIN),126,34,214,42,GBA_GREEN,2);
 
   char l[40];
   snprintf(l, sizeof(l), T(S_BTL_BEAT), t.name);
@@ -4898,11 +5129,19 @@ void renderWin() {
     gfx->print(T(S_WIN_MAXED));
   }
 
-  gfx->setTextColor(UI_INK_SOFT);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - strlen(T(S_BACK)) * 6, 380);
-  gfx->print(T(S_BACK));
+  gbaRibbon(gfx,T(S_BACK),156,382,154,43,GBA_BLUE,2);
   gfx->flush();
+}
+
+// Battle command cards share the Game Boy Advance palette. Their geometry is
+// unchanged so the existing touch-hit test still exercises the real controls.
+static void btlCommandCard(int x,int y,uint16_t accent,bool enabled) {
+  gbaFrame(gfx,x,y,BTL_CELL_W,BTL_CELL_H,
+           enabled?GBA_CREAM:GBA_PAPER,enabled?accent:GBA_DISABLED);
+  gfx->fillRect(x+5,y+7,6,BTL_CELL_H-14,enabled?accent:GBA_DISABLED);
+}
+static void btlDialogPanel() {
+  gbaFrame(gfx,BTL_GRID_X,BTL_GRID_Y,328,BTL_GRID_H,GBA_CREAM,GBA_BLUE);
 }
 
 void renderBattle() {
@@ -4912,12 +5151,24 @@ void renderBattle() {
   drawBattleBack();
   // the lower band stays flat so the move grid and the HP text keep their
   // contrast against it
-  gfx->fillRect(0, 254, 466, 212, UI_BG_DAY);
+  gfx->fillRect(0,254,466,212,GBA_WATER);
+  gfx->fillRect(0,254,466,5,GBA_NAVY);
+  gfx->drawFastHLine(0,261,466,GBA_WHITE);
+  btlSide(88,78,300,40,btlFoe,1);   // foe: upper-left information card
+  btlSide(250,180,76,150,btlYou,0); // yours: lower-right information card
 
-  // x=82 not 58: at y=60 the round bezel starts around x=77, and a longer
-  // name like BLASTOISE was losing its first characters off the edge
-  btlSide(82, 82, 300, 40, btlFoe, 1);    // foe reads top-left, sprite top-right
-  btlSide(250, 190, 76, 168, btlYou, 0);  // you read bottom-right, sprite bottom-left
+  // Paging strip remains outside the 2x2 touch grid (its first row is y=270).
+  if(btlMenu==3 && !btlMsgCount) {
+    uint8_t pages=btlBagPages();
+    if(btlBagPage>=pages)btlBagPage=pages-1;
+    char pg[20];snprintf(pg,sizeof(pg),"BAG %u/%u",btlBagPage+1,pages);
+    gfx->setTextSize(1);gfx->setTextColor(GBA_NAVY);
+    gfx->setCursor(CX-(int)strlen(pg)*3,257);gfx->print(pg);
+    gfx->setTextColor(btlBagPage>0?GBA_BLUE:GBA_DISABLED);
+    gfx->setCursor(95,256);gfx->print("<<");
+    gfx->setTextColor(btlBagPage+1<pages?GBA_BLUE:GBA_DISABLED);
+    gfx->setCursor(359,256);gfx->print(">>");
+  }
 
   // Waiting on the other device. Without this the screen is identical to the
   // one where it is your turn, so a tap that has been sent and a tap that was
@@ -4930,8 +5181,7 @@ void renderBattle() {
     lanQuitConfirm = false;   // the dialog cannot outlive the wait it belongs to
   }
   if (lanWait && !btlMsgCount) {
-    gfx->fillRoundRect(BTL_GRID_X, BTL_GRID_Y, 328, BTL_GRID_H, 12, UI_WHITE);
-    gfx->drawRoundRect(BTL_GRID_X, BTL_GRID_Y, 328, BTL_GRID_H, 12, UI_INK);
+    btlDialogPanel();
     gfx->setTextColor(UI_INK_SOFT);
     gfx->setTextSize(2);
     const char *w = T(S_LAN_WAITFOE);
@@ -4954,9 +5204,8 @@ void renderBattle() {
                         T(S_YES), UI_BAR_BAD, UI_WHITE, T(S_NO), UI_TRACK, UI_INK);
     }
   } else if (btlMsgCount) {            // narration takes over the menu area
-    gfx->fillRoundRect(BTL_GRID_X, BTL_GRID_Y, 328, BTL_GRID_H, 12, UI_WHITE);
-    gfx->drawRoundRect(BTL_GRID_X, BTL_GRID_Y, 328, BTL_GRID_H, 12, UI_INK);
-    gfx->setTextColor(UI_INK);
+    btlDialogPanel();
+    gfx->setTextColor(GBA_NAVY);
     gfx->setTextSize(2);
     char lines[3][25] = {{0}};
     const char *p = btlMsg[0];
@@ -4982,8 +5231,8 @@ void renderBattle() {
     }
     gfx->setTextColor(UI_INK_SOFT);
     gfx->setTextSize(1);
-    gfx->setCursor(CX - 18, BTL_GRID_Y + BTL_GRID_H - 14);
-    gfx->print("tap...");
+    gfx->setCursor(CX - 14, BTL_GRID_Y + BTL_GRID_H - 16);
+    gfx->print("v");
   } else if (btlMenu == 0) {
     // Four options on the 2x2 grid: FIGHT and BAG on top, POKEMON and RUN
     // below. FIGHT used to be a full-width row, which left nowhere for the bag;
@@ -4995,9 +5244,9 @@ void renderBattle() {
       // The bag is dead in a link fight: an item the peer was never told about
       // would desync the two devices, and the host is authoritative.
       bool live = !(i == 1 && btlLink);
-      gfx->fillRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, live ? UI_BG_DAY : UI_TRACK);
-      gfx->drawRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, live ? UI_INK : 0x8410);
-      gfx->setTextColor(live ? UI_INK : 0x8410);
+      const uint16_t accents[4]={GBA_RED,GBA_YELLOW,GBA_GREEN,GBA_PURPLE};
+      btlCommandCard(x,y,accents[i],live);
+      gfx->setTextColor(live?GBA_NAVY:GBA_SHADOW);
       gfx->setTextSize(2);
       gfx->setCursor(x + (BTL_CELL_W - (int)strlen(opt[i]) * 12) / 2, y + 19);
       gfx->print(opt[i]);
@@ -5008,7 +5257,7 @@ void renderBattle() {
     // permanent and belongs to the care sim.
     uint8_t shown = 0;
     uint8_t n = bag.distinctCount();
-    for (uint8_t idx = 0; idx < n && shown < 4; idx++) {
+    for (uint8_t idx = 0; idx < n; idx++) {
       ItemKey k = bag.keyAt(idx);
       if (!itemUsableInBattle(k)) continue;
       if (shown < btlBagPage * 4) { shown++; continue; }
@@ -5016,9 +5265,8 @@ void renderBattle() {
       if (cell >= 4) break;
       int x = BTL_CELL_X(cell), y = BTL_CELL_Y(cell);
       bool live = !itemIsBall(k) || btlWild;   // a ball needs a wild target
-      gfx->fillRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, live ? UI_BG_DAY : UI_TRACK);
-      gfx->drawRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, live ? UI_INK : 0x8410);
-      gfx->setTextColor(live ? UI_INK : 0x8410);
+      btlCommandCard(x,y,itemIsBall(k)?GBA_RED:GBA_GREEN,live);
+      gfx->setTextColor(live?GBA_NAVY:GBA_SHADOW);
       gfx->setTextSize(strlen(itemEntry(k).name) <= 11 ? 2 : 1);
       gfx->setCursor(x + 10, y + 8);
       gfx->print(itemEntry(k).name);
@@ -5042,9 +5290,8 @@ void renderBattle() {
       int x = BTL_CELL_X(i), y = BTL_CELL_Y(i);
       const Combatant &m = (i == btlSquadAt) ? btlYou : btlSquad[i];
       bool usable = (i != btlSquadAt) && !m.fainted();
-      gfx->fillRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, usable ? UI_BG_DAY : UI_TRACK);
-      gfx->drawRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, usable ? UI_INK : 0x8410);
-      gfx->setTextColor(usable ? UI_INK : 0x8410);
+      btlCommandCard(x,y,GBA_TEAL,usable);
+      gfx->setTextColor(usable?GBA_NAVY:GBA_SHADOW);
       gfx->setTextSize(strlen(m.name) <= 11 ? 2 : 1);
       gfx->setCursor(x + 10, y + 8);
       gfx->print(m.name);
@@ -5059,8 +5306,7 @@ void renderBattle() {
     for (int i = 0; i < MOVE_SLOTS; i++) {
       int x = BTL_CELL_X(i), y = BTL_CELL_Y(i);
       uint8_t mv = btlYou.moves[i];
-      gfx->fillRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, mv ? UI_BG_DAY : UI_TRACK);
-      gfx->drawRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, UI_INK);
+      btlCommandCard(x,y,mv?typeColor(MOVE_TBL[mv].type):GBA_DISABLED,mv!=0);
       if (!mv) continue;
       const char *name = moveName(mv);
       gfx->setTextColor(UI_INK);
@@ -5146,9 +5392,8 @@ int btlCellIndexAt(int16_t x, int16_t y) {
 // The way out of the move and switch screens. Without it the only exits were
 // choosing something or leaving the fight entirely.
 static void drawBtlBack() {
-  gfx->fillRoundRect(BTL_BACK_X, BTL_BACK_Y, BTL_BACK_W, BTL_BACK_H, 11, UI_TRACK);
-  gfx->drawRoundRect(BTL_BACK_X, BTL_BACK_Y, BTL_BACK_W, BTL_BACK_H, 11, UI_INK);
-  gfx->setTextColor(UI_INK);
+  gbaFrame(gfx,BTL_BACK_X,BTL_BACK_Y,BTL_BACK_W,BTL_BACK_H,GBA_CREAM,GBA_BLUE);
+  gfx->setTextColor(GBA_NAVY);
   gfx->setTextSize(2);
   gfx->setCursor(CX - (int)strlen(T(S_BACK)) * 6, BTL_BACK_Y + 14);
   gfx->print(T(S_BACK));
@@ -5170,6 +5415,7 @@ static bool btlBackTap(int16_t x, int16_t y) {
 // the turn. That is what stops a ball being risk-free -- you cannot throw one,
 // see it fail and simply leave.
 static void btlRun() {
+  btlItemTurnPending=false;
   if (btlWild && !btlOver) {
     btlMenu = 0;
     if (random(100) >= wildEscapeChance(btlYou.level, btlFoe.level)) {
@@ -5217,6 +5463,11 @@ void battleTap(int16_t x, int16_t y) {
       memcpy(btlMsg[i - 1], btlMsg[i], sizeof(btlMsg[0]));
     btlMsgCount--;
     if (btlMsgCount) return;
+    if (btlItemTurnPending && !btlOver) {
+      btlItemTurnPending=false;
+      btlResolve(0);  // using medicine costs the player's action
+      return;
+    }
     if (btlOver) {
       btlFreeSprites();
       // A wild win or catch never sets btlWinUntil (that is trainer-only, see
@@ -5278,6 +5529,17 @@ void battleTap(int16_t x, int16_t y) {
     return;
   }
   if (btlMenu == 3) {
+    // Visible page arrows in the stripe above the existing four touch cells.
+    // No valid item tap lands here, and swipes can perform the same paging.
+    if(y>=250 && y<269) {
+      const uint8_t pages=btlBagPages();
+      if(x>=79 && x<=155 && btlBagPage>0) {
+        btlBagPage--;sfxPlay(SFX_TAP);
+      } else if(x>=310 && x<=387 && btlBagPage+1<pages) {
+        btlBagPage++;sfxPlay(SFX_TAP);
+      }
+      return;
+    }
     if (btlBackTap(x, y)) return;
     uint8_t shown = 0;
     uint8_t n = bag.distinctCount();
@@ -5365,16 +5627,17 @@ static void renderPlayerBadges() {
   // the player's name if they have set one, the generic title if not; either
   // way tapping it opens the keyboard
   const char *tn = pet.trainerName[0] ? pet.trainerName : T(S_TRAINER);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(3);
-  gfx->setCursor(CX - (int)strlen(tn) * 9, 40);
-  gfx->print(tn);
+  // The name bar is the original rename touch target.
+  char title[26];
+  snprintf(title, sizeof(title), "%.22s", tn);
+  gbaRibbon(gfx, title, 104, 29, 258, 43, GBA_BLUE,
+            strlen(title) > 18 ? 1 : 2);
 
   // Pages 1 and 2 are the other regions' ladders: name them, and drop the
   // avatar so the badges have the room. Only page 0 is "you".
   if (playerBadgeRegion != 0) {
     const char *rn = TRAINER_SETS[playerBadgeRegion].region;
-    gfx->setTextColor(UI_INK);
+    gfx->setTextColor(GBA_TEAL);
     gfx->setTextSize(2);
     gfx->setCursor(CX - (int)strlen(rn) * 6, 120);
     gfx->print(rn);
@@ -5385,11 +5648,11 @@ static void renderPlayerBadges() {
     drawAvatar(pet.avatar, CX - AVATAR_PX * 2, 72, 4);
     // the sprite alone is not always obvious at 16x16, so it is named
     const char *an = AVATARS[pet.avatar % AVATAR_COUNT].name;
-    gfx->setTextColor(UI_INK);
+    gfx->setTextColor(GBA_NAVY);
     gfx->setTextSize(1);
     gfx->setCursor(CX - (int)strlen(an) * 3, 143);
     gfx->print(an);
-    gfx->setTextColor(UI_INK_SOFT);
+    gfx->setTextColor(GBA_TEAL);
     gfx->setCursor(CX - (int)strlen(T(S_AVATAR_HINT)) * 3, 154);
     gfx->print(T(S_AVATAR_HINT));
   }
@@ -5427,24 +5690,19 @@ static void renderPlayerBadges() {
       }
   }
   char l[32];
-  gfx->setTextColor(UI_INK);
+  gfx->setTextColor(GBA_NAVY);
   gfx->setTextSize(2);
   snprintf(l, sizeof(l), T(S_STREAK_FMT), pet.streak, pet.bestStreak);
-  gfx->setCursor(CX - (int)strlen(l) * 6, 286);
+  gfx->setCursor(CX - (int)strlen(l) * 6, 290);
   gfx->print(l);
   snprintf(l, sizeof(l), T(S_POKEDEX_FMT), pet.registeredCount(), DEX_COUNT);
-  gfx->setCursor(CX - (int)strlen(l) * 6, 312);
+  gfx->setCursor(CX - (int)strlen(l) * 6, 311);
   gfx->print(l);
   snprintf(l, sizeof(l), T(S_PARTY_FMT), (unsigned)(party.count() + (!pet.isEgg() ? 1 : 0)));
-  gfx->setCursor(CX - (int)strlen(l) * 6, 338);
+  gfx->setCursor(CX - (int)strlen(l) * 6, 332);
   gfx->print(l);
   if (playerBadgeRegion == 0) {
-    gfx->fillRoundRect(118, 358, 230, 45, 12, UI_BAR_OK);
-    gfx->drawRoundRect(118, 358, 230, 45, 12, UI_INK);
-    gfx->setTextColor(UI_WHITE);
-    gfx->setTextSize(2);
-    gfx->setCursor(CX - 7 * 6, 371);
-    gfx->print("FRIENDS");
+    gbaRibbon(gfx, "FRIENDS", 118, 358, 230, 45, GBA_PURPLE, 2);
   }
 }
 
@@ -5456,19 +5714,18 @@ static void renderPlayerMedals() {
     if (pet.hasMedal(1 << i)) got++;
   char head[24];
   snprintf(head, sizeof(head), T(S_MEDALS_FMT), got, MED_COUNT);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(3);
-  gfx->setCursor(CX - strlen(head) * 9, 44);
-  gfx->print(head);
+  gbaRibbon(gfx, head, 109, 30, 248, 45, GBA_BLUE,
+            strlen(head) > 18 ? 1 : 2);
 
   for (int i = 0; i < MED_COUNT; i++) {
     int x = 46 + (i % 2) * 190, y = 96 + (i / 2) * 58;
     bool g = pet.hasMedal(1 << i);
-    gfx->fillRoundRect(x, y, 180, 48, 10, g ? UI_BAR_OK : UI_TRACK);
-    gfx->drawRoundRect(x, y, 180, 48, 10, UI_INK);
-    gfx->setTextColor(g ? UI_BG_DAY : UI_INK);
-    gfx->setTextSize(2);
-    gfx->setCursor(x + (180 - (int)strlen(medalLabel(i)) * 12) / 2, y + 6);
+    gbaFrame(gfx, x, y, 180, 48, g ? GBA_CREAM : GBA_PAPER,
+             g ? GBA_GREEN : GBA_DISABLED);
+    gfx->setTextColor(g ? GBA_NAVY : GBA_SHADOW);
+    uint8_t sz = strlen(medalLabel(i)) > 14 ? 1 : 2;
+    gfx->setTextSize(sz);
+    gfx->setCursor(x + (180 - (int)strlen(medalLabel(i)) * 6 * sz) / 2, y + 7);
     gfx->print(medalLabel(i));
     gfx->setTextSize(1);
     gfx->setCursor(x + (180 - (int)strlen(medalDesc(i)) * 6) / 2, y + 30);
@@ -5476,22 +5733,28 @@ static void renderPlayerMedals() {
   }
   char tot[28];
   snprintf(tot, sizeof(tot), T(S_MEDALS_TOTAL_FMT), pet.totalMedals);
-  gfx->setTextColor(UI_INK_SOFT);
+  gfx->setTextColor(GBA_TEAL);
   gfx->setTextSize(1);
-  gfx->setCursor(CX - (int)strlen(tot) * 3, 344);
+  gfx->setCursor(CX - (int)strlen(tot) * 3, 352);
   gfx->print(tot);
 }
 
 void renderPlayer() {
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
-  if (playerPage < GYM_REGIONS) renderPlayerBadges();
-  else renderPlayerMedals();
-
-  gfx->setTextColor(UI_INK_SOFT);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - strlen(T(S_BACK)) * 6, playerPage == 0 ? 420 : 392);
-  gfx->print(T(S_BACK));
+  gbaBackdrop(gfx, GBA_WATER, GBA_MIST);
+  // The trainer name remains tappable at y=32..68 and the avatar remains
+  // tappable at y=70..146. These card frames are purely visual.
+  if (playerPage < GYM_REGIONS) {
+    gbaFrame(gfx, 92, 164, 282, 117, GBA_CREAM, GBA_GREEN);
+    gbaFrame(gfx, 111, 283, 244, 73, GBA_WHITE, GBA_TEAL);
+    renderPlayerBadges();
+  } else {
+    renderPlayerMedals();
+  }
+  // The player tile closes on a tap away from name/avatar/friends, and
+  // remains reachable by the global vertical Back gesture.
+  // Do not overlap the horizontal-swipe dots at y=440 on the trainer tile.
+  gbaRibbon(gfx, "BACK", 156, playerPage == 0 ? 407 : 380,
+            154, playerPage == 0 ? 26 : 32, GBA_BLUE, 2);
   uiChrome();
   gfx->flush();
 }
@@ -5552,9 +5815,11 @@ void renderSpeed() {
 
   if (spdOverUntil) {
     if (now > spdOverUntil) { spdOpen = false; return; }
+    gbaFrame(gfx, 84, 124, 298, 192, GBA_CREAM, GBA_TEAL);
+    gbaRibbon(gfx, "TRAINING RESULT", 131, 110, 204, 35, GBA_BLUE, 1);
     char b[24];
     snprintf(b, sizeof(b), T(S_SCORE_FMT), spdHits);
-    gfx->setTextColor(ink);
+    gfx->setTextColor(GBA_NAVY);
     gfx->setTextSize(4);
     gfx->setCursor(CX - strlen(b) * 12, 150);
     gfx->print(b);
@@ -5572,7 +5837,7 @@ void renderSpeed() {
     } else {
       char r[20];
       snprintf(r, sizeof(r), T(S_RECORD_FMT), pet.spdHi);
-      gfx->setTextColor(ink);
+      gfx->setTextColor(GBA_NAVY);
       gfx->setCursor(CX - strlen(r) * 6, 256);
       gfx->print(r);
     }
@@ -5595,6 +5860,7 @@ void renderSpeed() {
     spdSpawn();
   }
 
+  gbaFrame(gfx, 167, 18, 132, 84, GBA_CREAM, GBA_TEAL);
   // the target, shrinking as its window runs out so the urgency is visible
   uint32_t age = now - spdBorn;
   int life = spdLife();
@@ -5972,71 +6238,51 @@ void lanTap(int16_t x, int16_t y) {
 
 // ---------- gym list ----------
 void renderGyms() {
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
-  // The ladder's own region in the title, since a vertical swipe moves between
-  // three of them and "GYMS" alone would not say which you are looking at.
+  gbaBackdrop(gfx,GBA_WATER,GBA_MIST);
   char title[28];
-  snprintf(title, sizeof(title), "%s %s", TRAINER_SETS[gymRegion % GYM_REGIONS].region,
-           T(S_GYMS));
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(title) * 6, 42);
-  gfx->print(title);
-  // The badge count used to sit here, directly behind the difficulty pill. The
-  // region chooser already shows it per region, which is where you are choosing
-  // from, so it was both redundant and in the way.
-  // difficulty pill: hard caps YOUR team to the leader's size and level, so it
-  // is a different ladder with its own badges rather than a damage multiplier
-  const char *dif = T(gymHard ? S_HARD : S_EASY);
-  int dw = (int)strlen(dif) * 12 + 48;      // wider as well as taller
-  if (dw < 120) dw = 120;
-  gfx->fillRoundRect(CX - dw / 2, GYMDIF_Y, dw, GYMDIF_H, 12,
-                     gymHard ? UI_BAR_BAD : UI_TRACK);
-  gfx->setTextColor(gymHard ? UI_BG_DAY : UI_INK);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(dif) * 6, GYMDIF_Y + 14);
-  gfx->print(dif);
+  snprintf(title,sizeof(title),"%s %s",TRAINER_SETS[gymRegion%GYM_REGIONS].region,T(S_GYMS));
+  gbaRibbon(gfx,title,142,20,182,37,GBA_BLUE,strlen(title)>14?1:2);
 
-  for (int i = 0; i < GYM_ROWS; i++) {
-    uint8_t idx = gymPage * GYM_ROWS + i;
-    if (idx >= TRAINER_COUNT) break;
-    const Trainer &t = TRAINERS[idx];
-    int rx, y, rw, rh;
-    gymRowRect(i, &rx, &y, &rw, &rh);
-    bool done = pet.hasBadge(gymRegion, idx, gymHard);
-    bool open_ = gymUnlocked(idx, gymHard);
-    gfx->fillRoundRect(rx, y, rw, rh, 10, done ? UI_TRACK : UI_BG_DAY);
-    gfx->drawRoundRect(rx, y, rw, rh, 10, open_ ? UI_INK : UI_TRACK);
-    gfx->setTextColor(open_ ? UI_INK : UI_TRACK);
-    gfx->setTextSize(2);
-    gfx->setCursor(rx + 14, y + 8);
-    gfx->print(t.name);
-    gfx->setTextSize(1);
-    gfx->setTextColor(UI_INK_SOFT);
-    gfx->setCursor(rx + 14, y + 28);
-    gfx->print(open_ ? t.place : T(S_LOCKED));
-    // the level of the strongest creature: the honest measure of the wall
-    uint8_t top = 0;
-    for (int k = 0; k < t.count; k++)
-      if (t.team[k].level > top) top = t.team[k].level;
-    char lv[16];
-    snprintf(lv, sizeof(lv), "Lv.%u x%u", top, t.count);
-    gfx->setTextColor(done ? UI_BAR_OK : (open_ ? UI_INK : UI_TRACK));
-    gfx->setCursor(rx + rw - 12 - (int)strlen(lv) * 6, y + 28);
-    gfx->print(lv);
-    if (done) {
-      gfx->setTextColor(UI_BAR_OK);
-      gfx->setCursor(rx + rw - 26, y + 8);
-      gfx->print("*");
+  // Difficulty is a separate, finger-sized control at y=60..104.
+  const char *dif=T(gymHard?S_HARD:S_EASY);
+  gbaFrame(gfx,CX-84,GYMDIF_Y,168,GYMDIF_H,
+           gymHard?GBA_CREAM:GBA_MIST,gymHard?GBA_RED:GBA_GREEN);
+  gbaP5Text(CX,GYMDIF_Y+12,dif,2,gymHard?GBA_RED:GBA_NAVY);
+
+  for(uint8_t idx=0;idx<TRAINER_COUNT;idx++) {
+    const Trainer &t=TRAINERS[idx];
+    const int y=GYM_ROW_Y(idx)-gymScroll;
+    if(y<110||y+GYM_ROW_H>368)continue;
+    const int rx=GYM_ROW_X,rw=GYM_ROW_W,rh=GYM_ROW_H;
+    const bool done=pet.hasBadge(gymRegion,idx,gymHard);
+    const bool unlocked=gymUnlocked(idx,gymHard);
+    const uint16_t accent=!unlocked?GBA_DISABLED:done?GBA_GREEN:GBA_BLUE;
+    gbaFrame(gfx,rx,y,rw,rh,done?GBA_MIST:GBA_CREAM,accent);
+    gfx->fillRect(rx+9,y+8,6,rh-16,accent);
+    gfx->setTextColor(GBA_NAVY);
+    gfx->setTextSize(strlen(t.name)>16?1:2);
+    gfx->setCursor(rx+23,y+7);gfx->print(t.name);
+    if(done) {
+      gfx->setTextColor(GBA_GREEN);gfx->setTextSize(1);
+      gfx->setCursor(rx+rw-38,y+10);gfx->print("OK");
+    } else if(!unlocked) {
+      gfx->setTextColor(GBA_SHADOW);gfx->setTextSize(1);
+      gfx->setCursor(rx+rw-40,y+10);gfx->print("LOCK");
     }
+    gfx->setTextColor(unlocked?GBA_TEAL:GBA_SHADOW);
+    gfx->setTextSize(1);
+    char place[27];snprintf(place,sizeof(place),"%.26s",unlocked?t.place:T(S_LOCKED));
+    gfx->setCursor(rx+23,y+29);gfx->print(place);
+    uint8_t top=0;
+    for(int k=0;k<t.count;k++) if(t.team[k].level>top) top=t.team[k].level;
+    char lv[18];snprintf(lv,sizeof(lv),"LV%u x%u",(unsigned)top,(unsigned)t.count);
+    gfx->setTextColor(unlocked?GBA_NAVY:GBA_SHADOW);
+    gfx->setCursor(rx+rw-10-(int)strlen(lv)*6,y+29);gfx->print(lv);
   }
-  gfx->fillRoundRect(GYMBTN_X, GYMBTN_Y, GYMBTN_W, GYMBTN_H, 11, UI_BG_DAY);
-  gfx->drawRoundRect(GYMBTN_X, GYMBTN_Y, GYMBTN_W, GYMBTN_H, 11, UI_INK);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(2);
-  gfx->setCursor(GYMBTN_X + (GYMBTN_W - (int)strlen(T(S_LAN)) * 12) / 2, GYMBTN_Y + 14);
-  gfx->print(T(S_LAN));
+  uiListDrawBar(110,368,TRAINER_COUNT,50,gymScroll);
+  // Fixed, separate controls: BACK returns to the league chooser; LAN opens link.
+  gbaRibbon(gfx,"BACK",101,GYMBTN_Y,128,GYMBTN_H,GBA_BLUE,2);
+  gbaRibbon(gfx,T(S_LAN),238,GYMBTN_Y,128,GYMBTN_H,GBA_PURPLE,2);
   uiChrome();
   gfx->flush();
 }
@@ -6169,84 +6415,73 @@ static bool rpickSwipe(int dir) {
   if (p < 0) p = pages - 1;
   if (p >= pages) p = 0;
   rpickPage = (uint8_t)p;
+  if(mode!=RPICK_FOR_START)
+    regionScroll=(int16_t)uiListClamp(rpickPage*RPICK_PER_PAGE*72);
   sfxPlay(SFX_TAP);
   return true;
 }
 
 static void renderRegionPick(uint8_t mode) {
-  bool forGyms = (mode == RPICK_FOR_GYMS);
-  uint8_t nreg = rpickRegions(mode);
-  uint8_t pages = rpickPageCount(mode);
-  if (rpickPage >= pages) rpickPage = 0;
-  uint8_t first = (uint8_t)(rpickPage * RPICK_PER_PAGE);
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
-  char ttl[40];
-  if (mode == RPICK_FOR_START) snprintf(ttl, sizeof(ttl), "%s", T(S_CHOOSE_REGION));
-  else if (forGyms) snprintf(ttl, sizeof(ttl), "%s", T(S_GYMS));
-  else snprintf(ttl, sizeof(ttl), T(S_POKEDEX_FMT), pet.registeredCount(), DEX_COUNT);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(ttl) * 6, 48);
-  gfx->print(ttl);
-
-  for (uint8_t row = 0; row < RPICK_PER_PAGE; row++) {
-    uint8_t i = (uint8_t)(first + row);
-    if (i >= nreg) break;
-    int y = RPICK_Y(row);
-    // The sprite pack is the gate. A region without it is drawn GREYED with a
-    // reason rather than dropped from the list: hiding it would say "this
-    // region does not exist" when what we mean is "download its pack".
-    bool open = forGyms || regionAvailable(i);
-    gfx->fillRoundRect(RPICK_X, y, RPICK_W, RPICK_H, 12, open ? UI_WHITE : UI_BG_DAY);
-    gfx->drawRoundRect(RPICK_X, y, RPICK_W, RPICK_H, 12, open ? UI_INK : UI_TRACK);
-    const char *nm = forGyms ? TRAINER_SETS[i].region : REGIONS[i].name;
-    gfx->setTextColor(open ? UI_INK : UI_TRACK);
-    gfx->setTextSize(3);
-    gfx->setCursor(RPICK_X + 18, y + 12);
-    gfx->print(nm);
-    // At first boot there is no subtitle: naming the starter here would give
-    // away the next screen, and the counts the other two modes show would all
-    // read zero on a new save anyway.
-    char sub[28];
-    sub[0] = 0;
-    if (!open)
-      snprintf(sub, sizeof(sub), "%s", T(S_NEED_PACK));
-    else if (mode == RPICK_FOR_GYMS)
-      snprintf(sub, sizeof(sub), T(S_BADGES_FMT), pet.badgeCountIn(i, gymHard));
-    else if (mode == RPICK_FOR_DEX)
-      snprintf(sub, sizeof(sub), "%u/%u",
-               pet.registeredCountIn(REGIONS[i].lo, REGIONS[i].hi),
-               (unsigned)(REGIONS[i].hi - REGIONS[i].lo + 1));
-    if (sub[0]) {
-      gfx->setTextColor(UI_INK_SOFT);
-      gfx->setTextSize(2);
-      gfx->setCursor(RPICK_X + RPICK_W - 18 - (int)strlen(sub) * 12, y + 22);
-      gfx->print(sub);
+  const bool forGyms=(mode==RPICK_FOR_GYMS);
+  const uint8_t nreg=rpickRegions(mode), pages=rpickPageCount(mode);
+  if(rpickPage>=pages) rpickPage=0;
+  const bool continuous=(mode!=RPICK_FOR_START);
+  const uint8_t first=continuous?0:(uint8_t)(rpickPage*RPICK_PER_PAGE);
+  gbaBackdrop(gfx,GBA_WATER,GBA_MIST);
+  char title[42];
+  if(mode==RPICK_FOR_START) snprintf(title,sizeof(title),"%s",T(S_CHOOSE_REGION));
+  else if(forGyms) snprintf(title,sizeof(title),"%s",T(S_GYMS));
+  else snprintf(title,sizeof(title),T(S_POKEDEX_FMT),pet.registeredCount(),DEX_COUNT);
+  gbaRibbon(gfx,title,112,35,242,39,GBA_BLUE,strlen(title)>17?1:2);
+  gbaP5Text(CX,83,forGyms?"SELECT A LEAGUE":"SELECT A REGION",1,GBA_TEAL);
+  const uint16_t accents[3]={GBA_GREEN,GBA_BLUE,GBA_PURPLE};
+  for(uint8_t i=first;i<nreg;i++) {
+    const int y=RPICK_Y(continuous?i:(i-first))-(continuous?regionScroll:0);
+    if(continuous && (y<108||y+RPICK_H>(forGyms?325:355))) continue;
+    if(!continuous && i>=first+RPICK_PER_PAGE) break;
+    const bool available=forGyms||regionAvailable(i);
+    const uint16_t accent=available?accents[i%3]:GBA_DISABLED;
+    gbaFrame(gfx,RPICK_X,y,RPICK_W,RPICK_H,
+             available?GBA_CREAM:GBA_PAPER,accent);
+    gfx->fillRect(RPICK_X+9,y+11,7,RPICK_H-22,accent);
+    const char *nm=forGyms?TRAINER_SETS[i].region:REGIONS[i].name;
+    gfx->setTextColor(available?GBA_NAVY:GBA_SHADOW);
+    gfx->setTextSize(strlen(nm)>17?1:2);
+    gfx->setCursor(RPICK_X+26,y+11);gfx->print(nm);
+    char sub[36];sub[0]=0;
+    if(!available) snprintf(sub,sizeof(sub),"%s",T(S_NEED_PACK));
+    else if(mode==RPICK_FOR_GYMS)
+      snprintf(sub,sizeof(sub),T(S_BADGES_FMT),pet.badgeCountIn(i,gymHard));
+    else if(mode==RPICK_FOR_DEX)
+      snprintf(sub,sizeof(sub),"%u/%u REGISTERED",
+               pet.registeredCountIn(REGIONS[i].lo,REGIONS[i].hi),
+               (unsigned)(REGIONS[i].hi-REGIONS[i].lo+1));
+    if(sub[0]) {
+      gfx->setTextColor(available?GBA_TEAL:GBA_SHADOW);
+      gfx->setTextSize(1);
+      gfx->setCursor(RPICK_X+27,y+41);gfx->print(sub);
     }
-  }
-  if (forGyms) {
-    gfx->fillRoundRect(LANBTN_X, LANBTN_Y, LANBTN_W, LANBTN_H, 11, UI_BG_DAY);
-    gfx->drawRoundRect(LANBTN_X, LANBTN_Y, LANBTN_W, LANBTN_H, 11, UI_INK);
-    gfx->setTextColor(UI_INK);
+    gfx->setTextColor(available?GBA_BLUE:GBA_DISABLED);
     gfx->setTextSize(2);
-    gfx->setCursor(CX - strlen(T(S_LAN)) * 6, LANBTN_Y + 14);
-    gfx->print(T(S_LAN));
+    gfx->setCursor(RPICK_X+RPICK_W-33,y+23);gfx->print(">");
   }
-  if (pages > 1) {                        // dots: which page of regions this is
-    int total = pages * 16 - 8;
-    for (uint8_t d = 0; d < pages; d++) {
-      int cx = CX - total / 2 + d * 16;
-      if (d == rpickPage) gfx->fillCircle(cx, RPICK_DOTS_Y, RPICK_DOT_R, UI_INK);
-      else gfx->drawCircle(cx, RPICK_DOTS_Y, RPICK_DOT_R, UI_TRACK);
+  if(forGyms)
+    gbaRibbon(gfx,T(S_LAN),LANBTN_X,LANBTN_Y,LANBTN_W,LANBTN_H,GBA_PURPLE,2);
+  if(continuous) {
+    uiListDrawBar(108,forGyms?325:355,nreg,72,regionScroll);
+  } else if(pages>1) {
+    const int total=pages*16-8;
+    for(uint8_t d=0;d<pages;d++) {
+      const int cx=CX-total/2+d*16;
+      if(d==rpickPage) gfx->fillCircle(cx,RPICK_DOTS_Y,RPICK_DOT_R,GBA_BLUE);
+      else gfx->drawCircle(cx,RPICK_DOTS_Y,RPICK_DOT_R,GBA_SHADOW);
     }
+    // Onboarding's region pages wrap, so both directions are always valid.
+    // The same chevrons used on the tile axis teach the swipe interaction.
+    uiDrawHorizontalCues(true,true,RPICK_DOTS_Y);
   }
-  if (mode != RPICK_FOR_START) {          // first boot has nowhere to go back to
-    gfx->setTextColor(UI_INK_SOFT);
-    gfx->setTextSize(2);
-    gfx->setCursor(CX - strlen(T(S_BACK)) * 6, 392);
-    gfx->print(T(S_BACK));
-  }
+  if(mode!=RPICK_FOR_START)
+    gbaRibbon(gfx,"BACK",174,395,118,35,GBA_BLUE,2);
   uiChrome();
   gfx->flush();
 }
@@ -6258,6 +6493,15 @@ static void renderRegionPick(uint8_t mode) {
 static int regionPickTap(int16_t x, int16_t y, uint8_t mode) {
   if (x < RPICK_X || x > RPICK_X + RPICK_W) return -1;
   uint8_t nreg = rpickRegions(mode);
+  if(mode!=RPICK_FOR_START) {
+    int i=uiListIndexAt(y,108,mode==RPICK_FOR_GYMS?325:355,72,
+                        RPICK_H,regionScroll,nreg);
+    if(i<0)return -1;
+    if(mode!=RPICK_FOR_GYMS&&!regionAvailable(i)) {
+      sfxPlay(SFX_DENY); return -1;
+    }
+    return i;
+  }
   for (uint8_t row = 0; row < RPICK_PER_PAGE; row++) {
     uint8_t i = (uint8_t)(rpickPage * RPICK_PER_PAGE + row);
     if (i >= nreg) break;
@@ -6336,93 +6580,75 @@ void renderCardMedals() {
 // que antes eran invisibles (cuanto falta para subir/evolucionar y por que)
 void renderCardProgress() {
   const DexEntry &d = DEX_TBL[pet.speciesId];
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(3);
-  gfx->setCursor(CX - strlen(T(S_PROGRESS)) * 9, 44);
-  gfx->print(T(S_PROGRESS));
-
-  // nivel grande
-  char lv[10];
+  gbaRibbon(gfx, T(S_PROGRESS), 121, 31, 224, 42, GBA_BLUE, 2);
+  gbaFrame(gfx, 82, 87, 302, 123, GBA_CREAM, GBA_GREEN);
+  char lv[16];
   snprintf(lv, sizeof(lv), T(S_LVL_FMT), pet.level());
-  gfx->setTextSize(5);
-  gfx->setCursor(CX - strlen(lv) * 15, 86);
+  gfx->setTextColor(GBA_NAVY);
+  gfx->setTextSize(4);
+  gfx->setCursor(CX - (int)strlen(lv) * 12, 105);
   gfx->print(lv);
-
-  // barra de progreso al siguiente nivel (1 nivel = 60 min de juego)
   uint8_t into = pet.ageMinutes % MINUTES_PER_LEVEL;
-  int bx = 93, bw = 280, by = 158, bh = 22;
-  gfx->fillRoundRect(bx, by, bw, bh, 6, UI_TRACK);
-  int fw = (bw - 4) * into / MINUTES_PER_LEVEL;
-  if (fw > 0) gfx->fillRoundRect(bx + 2, by + 2, fw, bh - 4, 5, UI_BAR_OK);
-  char nx[26];
+  gfx->fillRoundRect(113, 158, 240, 16, 4, GBA_NAVY);
+  gfx->fillRoundRect(116, 161, 234, 10, 3, GBA_WHITE);
+  if (into) gfx->fillRoundRect(116, 161, 234*(uint32_t)into/MINUTES_PER_LEVEL, 10, 3, GBA_GREEN);
+  char nx[40];
   snprintf(nx, sizeof(nx), T(S_NEXT_LVL_FMT), MINUTES_PER_LEVEL - into, pet.level() + 1);
-  gfx->setTextColor(UI_INK);
+  gfx->setTextColor(GBA_NAVY);
   gfx->setTextSize(2);
-  gfx->setCursor(CX - strlen(nx) * 6, by + 32);
+  gfx->setCursor(CX - (int)strlen(nx)*6, 183);
   gfx->print(nx);
 
-  // estado de evolucion
-  gfx->setTextColor(UI_INK_SOFT);
-  gfx->setCursor(CX - strlen(T(S_EVO_LABEL)) * 6, 230);
+  gbaFrame(gfx, 82, 220, 302, 112, GBA_WHITE, GBA_TEAL);
+  gfx->setTextColor(GBA_NAVY);
+  gfx->setTextSize(2);
+  gfx->setCursor(CX - (int)strlen(T(S_EVO_LABEL))*6, 233);
   gfx->print(T(S_EVO_LABEL));
   char evoBuf[28];
   const char *evo;
-  uint16_t evoCol = UI_INK;
-  if (d.evolvesTo == 0) {
-    evo = T(S_FINAL_FORM);
-  } else {
-    // The SAME sum canEvolveNow() uses -- including the day owed for retiring
-    // the previous creature early. A card that left evoPenalty() out would
-    // promise an evolution that then does not happen.
+  uint16_t evoCol = GBA_NAVY;
+  if (d.evolvesTo == 0) evo = T(S_FINAL_FORM);
+  else {
     int needed = d.evolveLevel + pet.careMistakes + pet.evoPenalty();
     if (pet.level() >= needed) {
-      if (pet.lowestStat() >= 40) { evo = T(S_EVO_READY); evoCol = UI_BAR_OK; }
-      else { evo = T(S_EVO_BLOCKED); evoCol = UI_BAR_BAD; }
+      if (pet.lowestStat() >= 40) { evo = T(S_EVO_READY); evoCol = GBA_GREEN; }
+      else { evo = T(S_EVO_BLOCKED); evoCol = GBA_RED; }
     } else {
       snprintf(evoBuf, sizeof(evoBuf), T(S_EVO_IN_FMT), needed - pet.level());
       evo = evoBuf;
     }
   }
   gfx->setTextColor(evoCol);
-  gfx->setCursor(CX - strlen(evo) * 6, 256);
+  gfx->setCursor(CX - (int)strlen(evo)*6, 268);
   gfx->print(evo);
-
-  // the day inherited from an early retire, said out loud -- otherwise this
-  // creature simply evolves late and the player has no way to know why
   if (pet.evoPenalty()) {
-    gfx->setTextSize(1);
-    gfx->setTextColor(UI_BAR_WARN);
-    gfx->setCursor(CX - (int)strlen(T(S_EVO_SLOW)) * 3, 286);
+    gfx->setTextSize(1);gfx->setTextColor(GBA_RED);
+    gfx->setCursor(CX - (int)strlen(T(S_EVO_SLOW))*3, 305);
     gfx->print(T(S_EVO_SLOW));
-    gfx->setTextSize(2);
   }
-
-  // descuidos (retrasan la evolucion)
   char ms[24];
   snprintf(ms, sizeof(ms), T(S_MISTAKES_FMT), pet.careMistakes);
-  gfx->setTextColor(pet.careMistakes > 0 ? UI_BAR_BAD : UI_INK);
-  gfx->setCursor(CX - strlen(ms) * 6, 312);
+  gfx->setTextColor(pet.careMistakes ? GBA_RED : GBA_NAVY);
+  gfx->setTextSize(2);
+  gfx->setCursor(CX - (int)strlen(ms)*6, 341);
   gfx->print(ms);
 }
 
 void renderCard() {
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
+  gbaBackdrop(gfx, GBA_WATER, GBA_MIST);
   if (cardPage == 0) renderCardProfile();
   else if (cardPage == 1) renderCardStats();
   else if (cardPage == 2) renderCardMoves();
   else renderCardProgress();
 
-  // indicador de paginas + ayuda
   for (int i = 0; i < CARD_PAGES; i++) {
     int dx = CX - (CARD_PAGES - 1) * 13 + i * 26;
-    if (i == cardPage) gfx->fillCircle(dx, 374, 5, UI_INK);
-    else gfx->drawCircle(dx, 374, 4, UI_INK);
+    if (i == cardPage) {
+      gfx->fillCircle(dx, 383, 6, GBA_BLUE);
+      gfx->drawCircle(dx, 383, 6, GBA_NAVY);
+    } else gfx->fillCircle(dx, 383, 4, GBA_SHADOW);
   }
-  gfx->setTextColor(UI_INK_SOFT);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - strlen(T(S_BACK)) * 6, 398);
-  gfx->print(T(S_BACK));
+  gbaRibbon(gfx, T(S_BACK), 169, 404, 128, 36, GBA_BLUE, 2);
   uiChrome();
   gfx->flush();
 }
@@ -6529,21 +6755,20 @@ void habitatTap(int16_t x, int16_t y) {
     if (x < 170) habitatCategory = (habitatCategory+DC_COUNT-1)%DC_COUNT;
     else if (x > 295) habitatCategory = (habitatCategory+1)%DC_COUNT;
     else return;
-    habitatPage = 0; habitatMessage = nullptr; sfxPlay(SFX_TAP); return;
+    habitatPage = 0; habitatScroll=0;
+    habitatMessage = nullptr; sfxPlay(SFX_TAP); return;
   }
   if (y >= 335 && y < 405) {
-    uint8_t row = y < 370 ? 0 : 1;
-    uint8_t id = habitatOwnedAt(habitatCategory,(uint8_t)(habitatPage*2+row));
-    if (id) habitatToggle(id); else sfxPlay(SFX_DENY);
+    int row=uiListIndexAt(y,335,405,35,32,habitatScroll,
+                          habitatOwnedCount(habitatCategory));
+    if(row>=0) {
+      uint8_t id=habitatOwnedAt(habitatCategory,(uint8_t)row);
+      if(id)habitatToggle(id);else sfxPlay(SFX_DENY);
+    }
     return;
   }
-  if (y >= 410) {
-    uint8_t pages = (habitatOwnedCount(habitatCategory)+1)/2;
-    if (!pages) return;
-    if (x < 215 && habitatPage) --habitatPage;
-    else if (x > 250 && habitatPage+1 < pages) ++habitatPage;
-    sfxPlay(SFX_TAP);
-  }
+  // Footer is an informational scrolling hint; drag the items above it.
+
 }
 
 void renderHabitatEditor() {
@@ -6552,39 +6777,51 @@ void renderHabitatEditor() {
   drawScene(DEX_TBL[pet.speciesId].biome, millis(), gNight);
   drawHabitatDecor();
   drawPet();
-  gfx->fillRoundRect(128,35,210,50,12,UI_BG_DAY);
-  gfx->drawRoundRect(128,35,210,50,12,UI_INK);
-  gfx->setTextColor(UI_INK); gfx->setTextSize(2);
-  gfx->setCursor(170,53); gfx->print("HABITAT");
-  // Tap anywhere outside the lower panel to close, including the title.
-  gfx->fillRoundRect(42,267,382,196,18,UI_BG_DAY);
-  gfx->drawRoundRect(42,267,382,196,18,UI_INK);
-  gfx->setTextColor(UI_INK); gfx->setTextSize(2);
-  gfx->setCursor(68,294); gfx->print("<");
-  gfx->setCursor(353,294); gfx->print(">");
-  const char *cat = HABITAT_CATEGORY_NAMES[habitatCategory];
-  gfx->setCursor(CX-(int)strlen(cat)*6,294); gfx->print(cat);
-  uint8_t total = habitatOwnedCount(habitatCategory);
-  uint8_t pages = (total+1)/2;
-  if (habitatPage >= pages) habitatPage = 0;
-  for (uint8_t row = 0;row<2;++row) {
-    uint8_t id = habitatOwnedAt(habitatCategory,(uint8_t)(habitatPage*2+row));
-    int y = 335 + row*35;
-    gfx->fillRoundRect(77,y,312,32,6, id && habitatSlotOf(id)>=0 ? UI_BAR_OK : UI_TRACK);
-    gfx->setTextColor(UI_INK); gfx->setTextSize(1);
-    if (!id) { gfx->setCursor(165,y+12); gfx->print("NO MORE ITEMS"); continue; }
-    gfx->setCursor(94,y+12); gfx->print(decorDef(id).name);
-    gfx->setCursor(336,y+12); gfx->print(habitatSlotOf(id)>=0 ? "ON" : "OFF");
+  gbaRibbon(gfx,"HABITAT",121,33,224,42,GBA_GREEN,2);
+  // Draw within the original editor panel, so closing on the scene and the
+  // category/row/page tap ranges in habitatTap() remain unchanged.
+  gbaFrame(gfx,42,267,382,196,GBA_PAPER,GBA_TEAL);
+  gfx->fillRoundRect(77,278,312,49,6,GBA_NAVY);
+  gfx->fillRoundRect(80,280,306,45,4,GBA_CREAM);
+  const char *cat=HABITAT_CATEGORY_NAMES[habitatCategory];
+  gfx->setTextColor(GBA_BLUE);gfx->setTextSize(2);
+  gfx->setCursor(97,293);gfx->print("<");
+  gfx->setCursor(351,293);gfx->print(">");
+  gfx->setTextColor(GBA_NAVY);gfx->setTextSize(2);
+  gfx->setCursor(CX-(int)strlen(cat)*6,293);gfx->print(cat);
+  uint8_t total=habitatOwnedCount(habitatCategory);
+  habitatScroll=(int16_t)uiListClamp(habitatScroll);
+  for(uint8_t row=0;row<total;++row) {
+    uint8_t id=habitatOwnedAt(habitatCategory,row);
+    int y=335+row*35-habitatScroll;
+    if(y<335||y+32>405)continue;
+    bool active=id && habitatSlotOf(id)>=0;
+    gfx->fillRoundRect(77,y,312,32,5,GBA_NAVY);
+    gfx->fillRoundRect(79,y+2,308,28,4,active?GBA_MIST:GBA_WHITE);
+    gfx->fillRect(82,y+5,6,22,active?GBA_GREEN:GBA_DISABLED);
+    if (!id) {
+      gfx->setTextColor(GBA_SHADOW);gfx->setTextSize(2);
+      gfx->setCursor(137,y+9);gfx->print("NO MORE ITEMS");
+      continue;
+    }
+    const char *nm=decorDef(id).name;
+    gfx->setTextColor(GBA_NAVY);
+    gfx->setTextSize(strlen(nm)>19?1:2);
+    gfx->setCursor(95,y+(strlen(nm)>19?12:8));gfx->print(nm);
+    gfx->fillRoundRect(337,y+5,43,22,4,active?GBA_GREEN:GBA_SHADOW);
+    gfx->setTextColor(GBA_WHITE);gfx->setTextSize(1);
+    gfx->setCursor(active?350:347,y+12);
+    gfx->print(active?"ON":"OFF");
   }
-  gfx->setTextColor(UI_INK); gfx->setTextSize(1);
-  gfx->setCursor(118,424); gfx->print("< PREV");
-  gfx->setCursor(299,424); gfx->print("NEXT >");
-  char count[24];
-  snprintf(count,sizeof(count),"%u/%u",(unsigned)(pages?habitatPage+1:0),(unsigned)pages);
-  gfx->setCursor(219,424); gfx->print(count);
-  if (habitatMessage && millis() < habitatMessageUntil) {
-    gfx->fillRoundRect(128,235,210,26,6,UI_BAR_WARN);
-    gfx->setTextColor(UI_INK); gfx->setCursor(164,243); gfx->print(habitatMessage);
+  uiListDrawBar(335,405,total,35,habitatScroll);
+  gfx->setTextColor(GBA_NAVY);gfx->setTextSize(1);
+  gfx->setCursor(CX-42,423);gfx->print("DRAG LIST");
+  if (habitatMessage && millis()<habitatMessageUntil) {
+    gfx->fillRoundRect(112,235,242,27,5,GBA_YELLOW);
+    gfx->drawRoundRect(112,235,242,27,5,GBA_NAVY);
+    gfx->setTextColor(GBA_NAVY);gfx->setTextSize(1);
+    gfx->setCursor(CX-(int)strlen(habitatMessage)*3,244);
+    gfx->print(habitatMessage);
   }
   gfx->flush();
 }
@@ -6606,149 +6843,180 @@ static bool expeditionCandidate(uint8_t index,bool &fromBox,uint8_t &slot,PartyM
   }
   return false;
 }
-static void expeditionText(int x,int y,const char *v,uint8_t scale=2) {
-  gfx->setTextColor(UI_INK);gfx->setTextSize(scale);gfx->setCursor(x,y);gfx->print(v);
+\
+// All Expedition views share the same compact, GBA-era framed controls as
+// the Menu, Party and Summary screens. Drawing is deliberately separate from
+// the hit regions in expeditionTap(); no save or game rules are changed here.
+static void expeditionText(int x,int y,const char *v,uint8_t scale=2,
+                           uint16_t color=GBA_NAVY) {
+  gfx->setTextColor(color);gfx->setTextSize(scale);gfx->setCursor(x,y);gfx->print(v);
 }
-// Small, crisp, monochrome Poké Ball motif; no placeholder sprite artwork.
+static void expeditionCenter(int y,const char *v,uint8_t scale=1,
+                             uint16_t color=GBA_NAVY) {
+  expeditionText(CX-int(strlen(v))*3*scale,y,v,scale,color);
+}
 static void expeditionBallIcon(int x,int y) {
-  gfx->drawCircle(x,y,8,UI_INK);
-  gfx->drawFastHLine(x-7,y,15,UI_INK);
-  gfx->fillCircle(x,y,3,UI_BG_DAY);
-  gfx->drawCircle(x,y,3,UI_INK);
+  gfx->fillCircle(x,y,10,GBA_WHITE);
+  gfx->drawCircle(x,y,10,GBA_NAVY);
+  gfx->drawFastHLine(x-9,y,19,GBA_NAVY);
+  gfx->fillCircle(x,y,4,GBA_WHITE);
+  gfx->drawCircle(x,y,4,GBA_NAVY);
 }
 static void expeditionButton(int y,const char* label,bool enabled=true) {
-  gfx->fillRoundRect(82,y,302,43,11,enabled?UI_BG_DAY:UI_TRACK);
-  gfx->drawRoundRect(82,y,302,43,11,UI_INK);
-  expeditionText(CX-(int)strlen(label)*6,y+14,label);
+  gbaFrame(gfx,82,y,302,43,enabled?GBA_WHITE:GBA_DISABLED,
+           enabled?GBA_BLUE:GBA_SHADOW);
+  gfx->fillRect(90,y+8,6,26,enabled?GBA_GREEN:GBA_SHADOW);
+  const uint8_t sz=strlen(label)>16?1:2;
+  expeditionCenter(y+(43-8*sz)/2,label,sz,enabled?GBA_NAVY:GBA_SHADOW);
+}
+static void expeditionSmallPanel(int y,int h,uint16_t accent=GBA_TEAL) {
+  gbaFrame(gfx,78,y,310,h,GBA_CREAM,accent);
 }
 void renderExpeditions() {
-  gfx->fillCircle(CX,CY,231,UI_BG_DAY);
-  expeditionText(CX-(int)strlen("EXPEDITIONS")*6,47,"EXPEDITIONS");
-  gfx->drawRoundRect(52,90,362,315,15,UI_INK);
-  char line[64];
-  uint32_t now=rtcEpoch();
+  gbaBackdrop(gfx,GBA_WATER,GBA_MIST);
+  gbaRibbon(gfx,"EXPEDITIONS",115,35,236,42,GBA_BLUE,2);
+  gbaFrame(gfx,54,91,358,314,GBA_PAPER,GBA_TEAL);
+  char line[80];
+  const uint32_t now=rtcEpoch();
+
   if(expeditionResultsOpen) {
-    gfx->fillRoundRect(68,112,330,236,14,UI_TRACK);
-    gfx->drawRoundRect(68,112,330,236,14,UI_INK);
-    expeditionText(116,129,"TRIP COMPLETE",2);
-    gfx->drawFastHLine(95,160,276,UI_INK);
+    gbaRibbon(gfx,"TRIP COMPLETE",121,105,224,36,GBA_GREEN,2);
     const char *status=expeditionLastOutcome==EXP_SUCCESS?"SUCCESS!":
-      expeditionLastOutcome==EXP_PARTIAL?"PARTIAL SUCCESS":"NO TREASURE";
-    expeditionText(CX-(int)strlen(status)*3,166,status,1);
-    snprintf(line,sizeof(line),"POKEDOLLARS  +%lu",(unsigned long)expeditionLastRewards.coins);
-    expeditionBallIcon(83,194);
-    expeditionText(98,192,line,1);
+       expeditionLastOutcome==EXP_PARTIAL?"PARTIAL SUCCESS":"NO TREASURE";
+    expeditionCenter(157,status,2,expeditionLastOutcome==EXP_FAILED?GBA_RED:GBA_GREEN);
+    expeditionSmallPanel(189,141,GBA_YELLOW);
+    snprintf(line,sizeof(line),"POKEDOLLARS  +%lu",
+             (unsigned long)expeditionLastRewards.coins);
+    expeditionBallIcon(105,211);
+    expeditionText(125,204,line,1);
     if(expeditionLastRewards.itemCount) {
-      for(uint8_t i=0;i<expeditionLastRewards.itemCount;i++) {
+      for(uint8_t i=0;i<expeditionLastRewards.itemCount && i<3;i++) {
         const ExpeditionItemReward &item=expeditionLastRewards.items[i];
         snprintf(line,sizeof(line),"+%u  %s",(unsigned)item.count,itemEntry(item.key).name);
-        expeditionBallIcon(83,219+i*23);
-        expeditionText(98,215+i*23,line,1);
+        expeditionText(104,227+i*21,line,1);
       }
-    } else expeditionText(94,219,"NO ITEMS FOUND",1);
-    if(expeditionLastRewards.decoration) {
-      gfx->fillRoundRect(86,288,294,29,7,UI_BAR_WARN);
-      snprintf(line,sizeof(line),"RARE! %s",decorDef(expeditionLastRewards.decoration).name);
-      expeditionText(98,297,line,1);
-    } else expeditionText(98,298,"NO DECORATION FOUND",1);
-    expeditionButton(353,"DONE");
+    } else expeditionText(104,233,"NO ITEMS FOUND",1);
+    if(expeditionLastRewards.decoration && decorValid(expeditionLastRewards.decoration)) {
+      snprintf(line,sizeof(line),"RARE: %.30s",decorDef(expeditionLastRewards.decoration).name);
+      expeditionText(100,304,line,1,GBA_PURPLE);
+    } else expeditionText(104,304,"NO DECORATION FOUND",1,GBA_SHADOW);
+    expeditionButton(351,"DONE");
+
   } else if(expeditionJournal) {
-    expeditionText(CX-(int)strlen("JOURNAL")*6,113,"JOURNAL");
+    gbaRibbon(gfx,"TRIP JOURNAL",129,105,208,36,GBA_PURPLE,2);
     uint8_t count=expeditions.journalCount();
-    if(!count) expeditionText(104,205,"NO TRIPS YET",1);
+    if(!count) {
+      expeditionSmallPanel(170,95);
+      expeditionCenter(208,"NO TRIPS YET",2);
+    }
     for(uint8_t i=0;i<count && i<5;i++) {
       ExpeditionJournalEntry e=expeditions.journal(i);
       if(e.destination>=EXP_DEST_COUNT) continue;
-      snprintf(line,sizeof(line),"%s",EXP_DESTS[e.destination].name);
-      expeditionText(77,157+i*39,line,1);
-      snprintf(line,sizeof(line),"%s  %u P$",e.outcome==EXP_SUCCESS?"SUCCESS":e.outcome==EXP_PARTIAL?"PARTIAL":"FAILED",(unsigned)e.coins);
-      expeditionText(77,170+i*39,line,1);
-      if(e.decoration && decorValid(e.decoration)) {
-        snprintf(line,sizeof(line),"FOUND: %s",decorDef(e.decoration).name);
-        expeditionText(245,170+i*39,line,1);
-      }
+      int y=150+i*38;
+      gfx->fillRoundRect(88,y,290,34,4,GBA_NAVY);
+      gfx->fillRoundRect(90,y+2,286,30,3,i%2?GBA_WHITE:GBA_CREAM);
+      gfx->fillRect(93,y+5,5,24,e.outcome==EXP_SUCCESS?GBA_GREEN:
+                   e.outcome==EXP_PARTIAL?GBA_YELLOW:GBA_RED);
+      expeditionText(107,y+5,EXP_DESTS[e.destination].name,1);
+      snprintf(line,sizeof(line),"%s  %u P$%s",
+          e.outcome==EXP_SUCCESS?"SUCCESS":e.outcome==EXP_PARTIAL?"PARTIAL":"FAILED",
+          (unsigned)e.coins,(e.decoration&&decorValid(e.decoration))?"  +DECOR":"");
+      expeditionText(107,y+19,line,1,GBA_SHADOW);
     }
-    expeditionButton(353,"BACK TO TRIPS");
+    expeditionButton(351,"BACK TO TRIPS");
+
   } else if(expeditions.active()) {
     const ExpeditionDestination &d=EXP_DESTS[expeditions.destination()];
+    const PartyMon &traveler=expeditions.traveler();
     const bool ready=expeditions.isReady(now);
     const uint32_t left=expeditions.remainingSeconds(now);
     const uint32_t total=uint32_t(d.minutes)*60u;
-    const uint32_t elapsed=total-left;
 
-    // The expedition escrows the traveling Pokemon; it is no longer in Party
-    // or PC Box until collected. Render the actual escrowed identity here.
-    const PartyMon &traveler=expeditions.traveler();
-    const bool hasTraveler=!traveler.empty() && traveler.dex<=DEX_COUNT;
-    const char *name=hasTraveler?(traveler.nick[0]?traveler.nick:DEX_TBL[traveler.dex].name):"POKEMON";
-
-    gfx->fillRoundRect(74,105,318,112,9,UI_TRACK);
-    gfx->drawRoundRect(74,105,318,112,9,UI_INK);
-    expeditionText(98,114,"CURRENT ADVENTURE",1);
-    gfx->drawFastHLine(94,133,277,UI_INK);
-    const uint8_t *portrait=hasTraveler?thumbs.get(traveler.dex):nullptr;
-    if(portrait) drawThumb(portrait,87,144,1,false);
-    else expeditionBallIcon(111,170);
-    snprintf(line,sizeof(line),"%.12s  Lv.%u",name,hasTraveler?(unsigned)traveler.level:0u);
-    expeditionText(149,141,line,1);
-    expeditionText(149,159,d.name,1);
-    snprintf(line,sizeof(line),"%u MIN  DIFFICULTY %u",(unsigned)d.minutes,(unsigned)d.difficulty);
-    expeditionText(149,177,line,1);
-    expeditionText(149,196,ready?"RETURNED!":"EXPLORING...",1);
+    expeditionSmallPanel(108,117,GBA_GREEN);
+    expeditionCenter(118,"CURRENT ADVENTURE",1,GBA_TEAL);
+    expeditionCenter(136,d.name,2);
+    gfx->fillRoundRect(96,159,67,51,7,GBA_WATER);
+    if(!traveler.empty() && traveler.dex<=DEX_COUNT) {
+      const uint8_t *t=thumbs.get(traveler.dex);
+      if(t) drawThumb(t,89,144,1,false);
+      else expeditionBallIcon(129,185);
+      const char *nick=traveler.nick[0]?traveler.nick:DEX_TBL[traveler.dex].name;
+      // Keep long nicknames from spilling beyond the information card.
+      snprintf(line,sizeof(line),"%.18s",nick);
+      expeditionText(174,161,line,2);
+      snprintf(line,sizeof(line),"LV %u%s",(unsigned)traveler.level,
+               traveler.shiny?"  *":"");
+      expeditionText(174,182,line,1,GBA_PURPLE);
+    } else expeditionBallIcon(129,185);
+    expeditionText(174,197,ready?"RETURNED!":"EXPLORING...",1,
+                   ready?GBA_GREEN:GBA_TEAL);
 
     if(ready) {
-      expeditionText(CX-(int)strlen("WELCOME BACK!")*6,226,"WELCOME BACK!",2);
-      snprintf(line,sizeof(line),"%.22s returned safely!",name);
-      expeditionText(CX-(int)strlen(line)*3,318,line,1);
-      expeditionButton(249,"COLLECT REWARDS");
+      expeditionCenter(237,"WELCOME BACK!",2,GBA_GREEN);
+      // Keep the button inside the original collect-rewards touch region
+      // (y=240..305), even though the other screens' main button is lower.
+      expeditionButton(255,"COLLECT REWARDS");
+      expeditionCenter(315,"YOUR POKEMON RETURNED",1,GBA_NAVY);
     } else {
-      expeditionText(CX-(int)strlen("RETURN IN")*3,221,"RETURN IN",1);
-      snprintf(line,sizeof(line),"%02lu:%02lu:%02lu",(unsigned long)(left/3600),
-               (unsigned long)((left/60)%60),(unsigned long)(left%60));
-      expeditionText(CX-(int)strlen(line)*6,236,line,2);
-      expeditionText(94,273,"TRAVEL PROGRESS",1);
-      gfx->fillRoundRect(92,289,282,19,5,UI_TRACK);
-      gfx->drawRoundRect(92,289,282,19,5,UI_INK);
-      uint16_t progress=total?(uint16_t)((uint64_t)elapsed*274u/total):274;
-      if(progress>0)gfx->fillRoundRect(96,293,progress,11,3,UI_INK);
-      snprintf(line,sizeof(line),"%.25s is exploring!",name);
-      expeditionText(CX-(int)strlen(line)*3,319,line,1);
-      expeditionText(CX-(int)strlen("No recall until return.")*3,335,"No recall until return.",1);
+      expeditionCenter(233,"RETURN IN",1,GBA_TEAL);
+      snprintf(line,sizeof(line),"%02lu:%02lu:%02lu",
+               (unsigned long)(left/3600),(unsigned long)((left/60)%60),
+               (unsigned long)(left%60));
+      gbaRibbon(gfx,line,138,247,190,47,GBA_BLUE,2);
+      expeditionCenter(304,"TRAVEL PROGRESS",1,GBA_TEAL);
+      gfx->fillRoundRect(91,318,284,15,4,GBA_NAVY);
+      gfx->fillRoundRect(94,321,278,9,3,GBA_CREAM);
+      uint32_t elapsed=(left<total)?total-left:0;
+      uint16_t progress=total?uint16_t((uint64_t)elapsed*278u/total):278;
+      if(progress) gfx->fillRoundRect(94,321,progress,9,3,GBA_GREEN);
+      expeditionCenter(338,"NO RECALL UNTIL RETURN",1,GBA_NAVY);
     }
     expeditionButton(351,"JOURNAL");
+
   } else {
     const ExpeditionDestination &d=EXP_DESTS[expeditionDest];
-    expeditionText(93,112,"CHOOSE DESTINATION",1);
-    gfx->fillRoundRect(85,145,296,50,10,UI_TRACK);
-    expeditionText(98,159,"<",2);expeditionText(350,159,">",2);
-    expeditionText(CX-(int)strlen(d.name)*3,166,d.name,1);
-    snprintf(line,sizeof(line),"%u MIN   DIFFICULTY %u",d.minutes,d.difficulty);
-    expeditionText(111,209,line,1);
+    expeditionCenter(113,"CHOOSE DESTINATION",2,GBA_TEAL);
+    expeditionSmallPanel(141,67,GBA_BLUE);
+    expeditionText(101,158,"<",2,GBA_BLUE);
+    expeditionText(353,158,">",2,GBA_BLUE);
+    expeditionCenter(156,d.name,2);
+    snprintf(line,sizeof(line),"%u MIN  /  DIFFICULTY %u",
+             (unsigned)d.minutes,(unsigned)d.difficulty);
+    expeditionCenter(189,line,1,GBA_PURPLE);
+
     uint8_t n=expeditionCandidates();
     bool fromBox=false;uint8_t slot=0;PartyMon mon;
     if(n) expeditionPick%=n;
     bool found=n && expeditionCandidate(expeditionPick,fromBox,slot,mon);
+    expeditionSmallPanel(230,74,GBA_GREEN);
     if(found) {
       const char *name=mon.nick[0]?mon.nick:DEX_TBL[mon.dex].name;
-      snprintf(line,sizeof(line),"< %s  LV%u >",name,(unsigned)mon.level);
-      expeditionText(94,256,line,1);
-      expeditionText(125,277,fromBox?"FROM PC BOX":"FROM PARTY",1);
-    } else expeditionText(109,265,"NO STORED POKEMON",1);
-    bool eligible=found && expeditionEligible(uint8_t(n+(!pet.isEgg()?1:0)),!pet.isEgg(),false) && expeditions.healthy();
-    if(!eligible) expeditionText(94,307,"NEED 2 POKEMON",1);
+      snprintf(line,sizeof(line),"%.18s",name);
+      expeditionCenter(242,line,2);
+      snprintf(line,sizeof(line),"LV %u",(unsigned)mon.level);
+      expeditionCenter(261,line,1,GBA_PURPLE);
+      expeditionText(101,253,"<",2,GBA_TEAL);
+      expeditionText(353,253,">",2,GBA_TEAL);
+      expeditionCenter(279,fromBox?"FROM PC BOX":"FROM PARTY",1,GBA_SHADOW);
+    } else expeditionCenter(257,"NO STORED POKEMON",1,GBA_RED);
+
+    bool eligible=found && expeditionEligible(uint8_t(n+(!pet.isEgg()?1:0)),
+                   !pet.isEgg(),false) && expeditions.healthy();
+    if(!eligible) expeditionCenter(316,"NEED 2 AVAILABLE POKEMON",1,GBA_RED);
     else {
       const auto &species=DEX_TBL[mon.dex];
       const bool match=!strcmp(typeName(species.type1),d.preferredType)||
-        !strcmp(typeName(species.type2),d.preferredType);
-      snprintf(line,sizeof(line),"SUCCESS %u%% %s",
-        (unsigned)expeditionSuccessChance(d.difficulty,mon.level,match),
-        match?"TYPE BONUS!":"");
-      expeditionText(111,306,line,1);
+                        !strcmp(typeName(species.type2),d.preferredType);
+      snprintf(line,sizeof(line),"SUCCESS %u%%",
+          (unsigned)expeditionSuccessChance(d.difficulty,mon.level,match));
+      expeditionCenter(309,line,2,GBA_GREEN);
+      if(match) expeditionCenter(329,"TYPE BONUS!",1,GBA_TEAL);
     }
+    if(expeditionConfirm) expeditionCenter(342,"CANNOT RECALL - TAP TO CONFIRM",1,GBA_RED);
     expeditionButton(339,expeditionConfirm?"CONFIRM SEND":"SEND POKEMON",eligible);
-    if(expeditionConfirm) expeditionText(120,326,"NO RECALL!",1);
   }
-  expeditionText(182,423,"CLOSE",2);
+  // The close control remains below y=405, matching the original tap handler.
+  gbaRibbon(gfx,"CLOSE",176,410,114,37,GBA_RED,2);
   gfx->flush();
 }
 void expeditionTap(int16_t x,int16_t y) {
@@ -6807,7 +7075,7 @@ static void menuRowLabel(int i, char *out, size_t n) {
     case 3: snprintf(out, n, "%s", "HABITAT"); break;
     case 4: snprintf(out, n, "%s", "EXPEDITIONS"); break;
     case 5: snprintf(out, n, "%s", T(S_SETTINGS)); break;
-    case 6: snprintf(out, n, "%s", T(S_RETIRE)); break;
+    case 6: snprintf(out, n, "%s", pet.canFarewellNow() ? "FAREWELL" : T(S_RETIRE)); break;
     default: snprintf(out, n, "%s", T(S_CLOSE)); break;
   }
 }
@@ -6823,30 +7091,51 @@ static void menuRowLabel(int i, char *out, size_t n) {
 int uiMenuRowCenterY(int i) { return MENU_ROW_Y(i) + MENU_ROW_H / 2; }
 
 void drawMenu() {
-  // dim the game behind the panel so the overlay reads as modal, and so it is
-  // obvious that tapping the darkened area is a way out
-  for (int y = 0; y < 466; y += 2)
-    gfx->drawFastHLine(0, y, 466, gNight ? 0x0000 : 0x2104);
+  // Keep MENU_ROW_Y and its hit boxes intact: only the paint changes.
+  // GBA pause menus are opaque; avoid ghost text from the home HUD beneath.
+  gbaBackdrop(gfx, GBA_WATER, GBA_MIST);
+  gbaFrame(gfx, MENU_X, MENU_Y, MENU_W, MENU_H, GBA_PAPER, GBA_TEAL);
+  // The label is above row 0, not inside a touch target.
+  gbaRibbon(gfx, "MAIN MENU", 128, 38, 210, 36, GBA_BLUE, 2);
 
-  gfx->fillRoundRect(MENU_X, MENU_Y, MENU_W, MENU_H, 18, UI_WHITE);
-  gfx->drawRoundRect(MENU_X, MENU_Y, MENU_W, MENU_H, 18, UI_INK);
-
+  const uint16_t accents[MENU_ROWS] = {
+    GBA_BLUE, GBA_YELLOW, GBA_TEAL, GBA_GREEN,
+    GBA_RED, GBA_PURPLE, GBA_SHADOW, GBA_NAVY
+  };
+  const uint16_t fills[MENU_ROWS] = {
+    GBA_WATER, GBA_CREAM, GBA_WATER, GBA_MIST,
+    GBA_CREAM, GBA_WATER, GBA_PAPER, GBA_MIST
+  };
   for (int i = 0; i < MENU_ROWS; i++) {
-    int y = MENU_ROW_Y(i);
-    bool close = (i == MENU_ROWS - 1);
-    bool dead = (i == 6 && (expeditions.active() || !pet.canRetireNow())) ||
-                (i == 3 && (pet.isEgg() || pet.ceremony));   // an egg or a companion
-    gfx->fillRoundRect(MENU_X + 18, y, MENU_W - 36, MENU_ROW_H, 12,
-                       close || dead ? UI_TRACK : UI_BG_DAY);
-    gfx->drawRoundRect(MENU_X + 18, y, MENU_W - 36, MENU_ROW_H, 12, UI_INK);
+    const int y = MENU_ROW_Y(i);
+    const int x = MENU_X + 18, w = MENU_W - 36;
+    const bool close = (i == MENU_ROWS - 1);
+    const bool disabled = (i == 6 && (expeditions.active() || !pet.canRetireNow())) ||
+                          (i == 3 && (pet.isEgg() || pet.ceremony));
+    const uint16_t edge = disabled ? GBA_DISABLED : accents[i];
+    // Thin GBA double-outline; original hit rectangle remains x..x+w, y..y+34.
+    gfx->fillRoundRect(x, y, w, MENU_ROW_H, 5, GBA_NAVY);
+    gfx->fillRoundRect(x + 2, y + 2, w - 4, MENU_ROW_H - 4, 4,
+                       disabled ? GBA_DISABLED : fills[i]);
+    gfx->fillRect(x + 5, y + 4, 9, MENU_ROW_H - 8, edge);
+    gfx->drawFastHLine(x + 17, y + 3, w - 24, GBA_WHITE);
+    // A pixel-step arrow at the right, distinct from the larger touch area.
+    if (!close && !disabled) {
+      gfx->fillTriangle(x + w - 20, y + 11, x + w - 12, y + 17,
+                        x + w - 20, y + 23, GBA_NAVY);
+    }
     char lbl[28];
     menuRowLabel(i, lbl, sizeof(lbl));
-    gfx->setTextColor(UI_INK);
-    gfx->setTextSize(2);
-    gfx->setCursor(CX - (int)strlen(lbl) * 6, y + MENU_ROW_H / 2 - 8);
+    // Pokedex counters and translations must fit; auto-scale rather than clip.
+    const int size = (strlen(lbl) > 20) ? 1 : 2;
+    gfx->setTextSize(size);
+    gfx->setTextColor(disabled ? gbaRgb(96, 106, 105) : GBA_NAVY);
+    gfx->setCursor(CX - (int)strlen(lbl) * 3 * size,
+                   y + (MENU_ROW_H - 8 * size) / 2);
     gfx->print(lbl);
   }
 }
+
 
 // ---------- who you are raising ----------
 
@@ -6958,71 +7247,53 @@ static bool bagUseOnPet(ItemKey k) {
 }
 
 void renderBag() {
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(T(S_BAG)) * 6, 40);
-  gfx->print(T(S_BAG));
-
+  gbaBackdrop(gfx, GBA_WATER, GBA_MIST);
+  gbaRibbon(gfx, T(S_BAG), 140, 31, 186, 42, GBA_BLUE, 3);
   uint8_t n = bag.distinctCount();
-  uint8_t pages = bagPages();
-  if (bagPage >= pages) bagPage = 0;
+  bagScroll=(int16_t)uiListClamp(bagScroll);
   if (!n) {
-    gfx->setTextColor(UI_INK_SOFT);
-    gfx->setCursor(CX - (int)strlen(T(S_BAG_EMPTY)) * 6, CY - 8);
-    gfx->print(T(S_BAG_EMPTY));
+    gbaFrame(gfx, 91, 155, 284, 100, GBA_CREAM, GBA_TEAL);
+    const char *empty=T(S_BAG_EMPTY);
+    gfx->setTextColor(GBA_NAVY);gfx->setTextSize(2);
+    gfx->setCursor(CX-(int)strlen(empty)*6, 194);gfx->print(empty);
   }
-  for (uint8_t i = 0; i < BAG_PER_PAGE; i++) {
-    uint8_t idx = (uint8_t)(bagPage * BAG_PER_PAGE + i);
-    if (idx >= n) break;
-    ItemKey k = bag.keyAt(idx);
-    int y = BAG_ROW_Y(i);
-    bool usable = itemUsableInField(k);
-    gfx->fillRoundRect(76, y, 314, 50, 10, usable ? UI_WHITE : UI_TRACK);
-    gfx->drawRoundRect(76, y, 314, 50, 10, UI_INK);
-    gfx->setTextColor(usable ? UI_INK : 0x8410);
-    gfx->setTextSize(2);
-    gfx->setCursor(92, y + 17);
-    gfx->print(itemEntry(k).name);
-    char cnt[8];
-    snprintf(cnt, sizeof(cnt), "x%u", bag.count(k));
-    gfx->setCursor(374 - (int)strlen(cnt) * 12, y + 17);
+  static const uint16_t itemColors[4] = {GBA_BLUE,GBA_GREEN,GBA_YELLOW,GBA_PURPLE};
+  for (uint8_t idx=0; idx<n; ++idx) {
+    ItemKey k=bag.keyAt(idx);
+    int y=BAG_ROW_Y(idx)-bagScroll;
+    if(y<112||y+50>405)continue;
+    bool usable=itemUsableInField(k);
+    gbaFrame(gfx,76,y,314,50,usable?GBA_CREAM:GBA_PAPER,
+             usable?itemColors[idx%4]:GBA_DISABLED);
+    gfx->fillCircle(101,y+25,12,usable?itemColors[idx%4]:GBA_SHADOW);
+    gfx->drawCircle(101,y+25,12,GBA_NAVY);
+    gfx->fillCircle(101,y+25,4,GBA_WHITE);
+    const char *name=itemEntry(k).name;
+    uint8_t size=strlen(name)>17?1:2;
+    gfx->setTextColor(usable?GBA_NAVY:GBA_SHADOW);
+    gfx->setTextSize(size);
+    gfx->setCursor(121,y+(50-8*size)/2);
+    gfx->print(name);
+    char cnt[12];snprintf(cnt,sizeof(cnt),"x%u",(unsigned)bag.count(k));
+    gfx->setTextColor(GBA_BLUE);gfx->setTextSize(1);
+    gfx->setCursor(376-(int)strlen(cnt)*6,y+20);
     gfx->print(cnt);
   }
-  // A page NUMBER, not a dot row: the catalogue is append-only and a dot per
-  // page stopped fitting the round panel once the Pokedex reached 25 of them.
-  if (pages > 1) {
-    char pg[12];
-    snprintf(pg, sizeof(pg), "%u/%u", bagPage + 1, pages);
-    gfx->setTextColor(UI_INK);
-    gfx->setTextSize(2);
-    gfx->setCursor(CX - (int)strlen(pg) * 6, 386);
-    gfx->print(pg);
+  uiListDrawBar(112,405,n,58,bagScroll);
+  if (bagMsgUntil && millis()<bagMsgUntil) {
+    gbaFrame(gfx,66,CY-26,334,52,GBA_WHITE,GBA_YELLOW);
+    gfx->setTextColor(GBA_NAVY);gfx->setTextSize(2);
+    gfx->setCursor(CX-(int)strlen(bagMsg)*6,CY-8);gfx->print(bagMsg);
   }
-  if (bagMsgUntil && millis() < bagMsgUntil) {
-    gfx->fillRoundRect(66, CY - 26, 334, 52, 12, UI_WHITE);
-    gfx->drawRoundRect(66, CY - 26, 334, 52, 12, UI_INK);
-    gfx->setTextColor(UI_INK);
-    gfx->setTextSize(2);
-    gfx->setCursor(CX - (int)strlen(bagMsg) * 6, CY - 8);
-    gfx->print(bagMsg);
-  }
-  gfx->setTextColor(UI_INK_SOFT);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(T(S_BACK)) * 6, 414);
-  gfx->print(T(S_BACK));
+  gbaRibbon(gfx,T(S_BACK),170,412,126,33,GBA_BLUE,2);
   uiChrome();
   gfx->flush();
 }
 
 void bagTap(int16_t x, int16_t y) {
   uint8_t n = bag.distinctCount();
-  for (uint8_t i = 0; i < BAG_PER_PAGE; i++) {
-    uint8_t idx = (uint8_t)(bagPage * BAG_PER_PAGE + i);
-    if (idx >= n) break;
-    int ry = BAG_ROW_Y(i);
-    if (x < 76 || x > 390 || y < ry || y > ry + 50) continue;
+  int idx=uiListIndexAt(y,112,405,58,50,bagScroll,n);
+  if (idx>=0 && x>=76 && x<=390) {
     ItemKey k = bag.keyAt(idx);
     if (!itemUsableInField(k) || pet.isEgg()) { sfxPlay(SFX_DENY); return; }
     if (!bagUseOnPet(k)) { sfxPlay(SFX_DENY); bagSay("%s", T(S_ITEM_NOUSE)); return; }
@@ -7031,7 +7302,8 @@ void bagTap(int16_t x, int16_t y) {
     bagSay(T(S_ITEM_USED), itemEntry(k).name);
     return;
   }
-  bagOpen = false;   // anywhere else closes, like every other list screen
+  // Fixed BACK, not an accidental tap on blank space.
+  if(y>=410&&x>=170&&x<=296)bagOpen=false;
 }
 
 // ---------- the Poke Mart ----------
@@ -7063,92 +7335,69 @@ uint8_t martPages() {
 }
 
 void renderMart() {
-  int h = sceneHour();
-  gNight = pet.sleeping || h < 6 || h >= 20;
-  drawScene(pet.isEgg() ? 0 : DEX_TBL[pet.speciesId].biome, millis(), gNight);
+  gbaBackdrop(gfx,GBA_WATER,GBA_MIST);
+  gbaRibbon(gfx,T(S_MART),136,28,194,44,GBA_BLUE,2);
 
-  gfx->fillRoundRect(78, 28, 310, 54, 14, UI_BG_DAY);
-  gfx->drawRoundRect(78, 28, 310, 54, 14, UI_INK);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(3);
-  gfx->setCursor(CX - (int)strlen(T(S_MART)) * 9, 44);
-  gfx->print(T(S_MART));
-
-  // Category tabs: within the upper round display's safe horizontal chord.
-  gfx->fillRoundRect(89, 87, 140, 25, 6, martDecorTab ? UI_TRACK : UI_BAR_OK);
-  gfx->fillRoundRect(237, 87, 140, 25, 6, martDecorTab ? UI_BAR_OK : UI_TRACK);
-  gfx->setTextSize(2);
-  gfx->setTextColor(UI_INK);
-  gfx->setCursor(110, 92); gfx->print("ITEMS");
-  gfx->setCursor(260, 92); gfx->print("DECOR");
-
-  uint16_t ink = inkColor();
-  char wl[24];
-  snprintf(wl, sizeof(wl), T(S_WALLET_FMT), (unsigned long)pet.wallet);
-  gfx->setTextColor(ink);
-  gfx->setTextSize(4);
-  gfx->setCursor(CX - (int)strlen(wl) * 12, 116);
-  gfx->print(wl);
-
-  gfx->setTextSize(2);
-  gfx->setTextColor(ink);
-  gfx->setCursor(CX - (int)strlen(T(S_MART_RATE)) * 6, 156);
-  gfx->print(T(S_MART_RATE));
-  char sv[64];
-  snprintf(sv, sizeof(sv), T(S_MART_STEPS_FMT), (unsigned long)pet.stepsTotal);
-  gfx->setCursor(CX - (int)strlen(sv) * 6, 176);
-  gfx->print(sv);
-
-  uint8_t n = martDecorTab ? martDecorCount() : martSellableCount();
-  uint8_t pages = martPages();
-  if (martPage >= pages) martPage = 0;
-  for (uint8_t i = 0; i < MART_PER_PAGE; ++i) {
-    uint8_t idx = (uint8_t)(martPage * MART_PER_PAGE + i);
-    if (idx >= n) break;
-    const uint8_t id = martDecorTab ? martDecorAt(idx) : martKeyAt(idx);
-    const uint16_t price = martDecorTab ? decorDef(id).price : itemEntry(id).price;
-    const bool owned = martDecorTab && decor.owns(id);
-    const bool afford = !owned && pet.wallet >= price;
-    const int y = MART_ROW_Y(i);
-    gfx->fillRoundRect(76, y, 314, 50, 10, afford ? UI_BAR_OK : UI_TRACK);
-    gfx->drawRoundRect(76, y, 314, 50, 10, UI_INK);
-    gfx->setTextColor(afford ? UI_BG_DAY : UI_INK);
-    gfx->setTextSize(2);
-    gfx->setCursor(88, y + 17);
-    // Keep labels within the price column, even for long decoration names.
-    char name[19];
-    snprintf(name, sizeof(name), "%.18s", martDecorTab ? decorDef(id).name : itemEntry(id).name);
-    gfx->print(name);
-    char pr[12];
-    if (owned) snprintf(pr, sizeof(pr), "OWNED");
-    else snprintf(pr, sizeof(pr), "$%u", price);
-    gfx->setCursor(380 - (int)strlen(pr) * 12, y + 17);
-    gfx->print(pr);
+  // The 25px tabs retain their existing click rectangles.
+  const char *const tabs[2]={"ITEMS","DECOR"};
+  for(int i=0;i<2;i++) {
+    const int x=i?237:89;
+    const bool selected=(martDecorTab==(i!=0));
+    gfx->fillRoundRect(x,87,140,25,5,GBA_NAVY);
+    gfx->fillRoundRect(x+2,89,136,21,4,selected?GBA_YELLOW:GBA_PAPER);
+    gbaP5Text(x+70,91,tabs[i],2,selected?GBA_NAVY:GBA_SHADOW);
   }
-  if (pages > 1) {
-    char pg[12];
-    snprintf(pg, sizeof(pg), "%u/%u", martPage + 1, pages);
-    gfx->setTextColor(ink);
-    gfx->setTextSize(2);
-    gfx->setCursor(CX - (int)strlen(pg) * 6, 386);
-    gfx->print(pg);
-  }
-  gfx->setTextColor(ink);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(T(S_BACK)) * 6, 414);
-  gfx->print(T(S_BACK));
 
-  if (martConfirmItem || martConfirmDecor) {
-    const char *name = martConfirmDecor ? decorDef(martConfirmDecor).name
-                                        : itemEntry(martConfirmItem).name;
-    const uint16_t price = martConfirmDecor ? decorDef(martConfirmDecor).price
-                                           : itemEntry(martConfirmItem).price;
-    char q[50];
-    snprintf(q, sizeof(q), T(S_MART_BUY_Q), name);
-    char cost[24];
-    snprintf(cost, sizeof(cost), T(S_MART_PRICE_FMT), (unsigned long)price);
-    drawConfirmPanel(q, cost, nullptr, UI_INK_SOFT,
-                     T(S_YES), UI_BAR_OK, UI_WHITE, T(S_NO), UI_TRACK, UI_INK);
+  char wallet[32];
+  snprintf(wallet,sizeof(wallet),T(S_WALLET_FMT),(unsigned long)pet.wallet);
+  gbaFrame(gfx,101,118,264,52,GBA_CREAM,GBA_YELLOW);
+  gbaP5Text(CX,127,wallet,strlen(wallet)>16?2:3);
+  char steps[64];
+  snprintf(steps,sizeof(steps),T(S_MART_STEPS_FMT),(unsigned long)pet.stepsTotal);
+  gbaP5Text(CX,175,T(S_MART_RATE),1,GBA_TEAL);
+  gbaP5Text(CX,190,steps,strlen(steps)>32?1:2,GBA_NAVY);
+
+  const uint8_t n=martDecorTab?martDecorCount():martSellableCount();
+  martScroll=(int16_t)uiListClamp(martScroll);
+  for(uint8_t idx=0;idx<n;idx++) {
+    const uint8_t id=martDecorTab?martDecorAt(idx):martKeyAt(idx);
+    const uint16_t price=martDecorTab?decorDef(id).price:itemEntry(id).price;
+    const bool owned=martDecorTab&&decor.owns(id);
+    const bool afford=!owned&&pet.wallet>=price;
+    const int y=MART_ROW_Y(idx)-martScroll;
+    if(y<210||y+50>390)continue;
+    gbaFrame(gfx,76,y,314,50,afford?GBA_CREAM:GBA_PAPER,
+             owned?GBA_BLUE:afford?GBA_GREEN:GBA_DISABLED);
+    gfx->fillRect(84,y+8,6,34,owned?GBA_BLUE:afford?GBA_GREEN:GBA_SHADOW);
+    const char *src=martDecorTab?decorDef(id).name:itemEntry(id).name;
+    char name[20];snprintf(name,sizeof(name),"%.19s",src);
+    const uint8_t nameSize=strlen(name)>13?1:2;
+    gfx->setTextColor(afford?GBA_NAVY:GBA_SHADOW);
+    gfx->setTextSize(nameSize);
+    gfx->setCursor(98,y+10);gfx->print(name);
+    gfx->setTextColor(owned?GBA_BLUE:afford?GBA_TEAL:GBA_SHADOW);
+    gfx->setTextSize(1);
+    gfx->setCursor(99,y+32);gfx->print(owned?"IN COLLECTION":afford?"AVAILABLE":"NOT ENOUGH P$");
+    char pr[14];
+    if(owned) snprintf(pr,sizeof(pr),"OWNED");
+    else snprintf(pr,sizeof(pr),"$%u",(unsigned)price);
+    gfx->setTextColor(owned?GBA_BLUE:GBA_NAVY);
+    gfx->setTextSize(2);
+    gfx->setCursor(379-(int)strlen(pr)*12,y+17);gfx->print(pr);
+  }
+  uiListDrawBar(210,390,n,60,martScroll);
+  gbaRibbon(gfx,"BACK",173,404,120,34,GBA_BLUE,2);
+  // Buying stays behind the same confirmation dialog and tap handlers.
+  if(martConfirmItem||martConfirmDecor) {
+    const char *name=martConfirmDecor?decorDef(martConfirmDecor).name
+                                     :itemEntry(martConfirmItem).name;
+    const uint16_t price=martConfirmDecor?decorDef(martConfirmDecor).price
+                                           :itemEntry(martConfirmItem).price;
+    char question[50],cost[24];
+    snprintf(question,sizeof(question),T(S_MART_BUY_Q),name);
+    snprintf(cost,sizeof(cost),T(S_MART_PRICE_FMT),(unsigned long)price);
+    drawConfirmPanel(question,cost,nullptr,UI_INK_SOFT,T(S_YES),
+                     UI_BAR_OK,UI_WHITE,T(S_NO),UI_TRACK,UI_INK);
   }
   uiChrome();
   gfx->flush();
@@ -7187,19 +7436,16 @@ void martTap(int16_t x, int16_t y) {
     return;
   }
   if (x >= 89 && x <= 229 && y >= 87 && y <= 112) {
-    if (martDecorTab) { martDecorTab = false; martPage = 0; sfxPlay(SFX_TAP); }
+    if (martDecorTab) { martDecorTab = false; martPage = 0; martScroll=0; sfxPlay(SFX_TAP); }
     return;
   }
   if (x >= 237 && x <= 377 && y >= 87 && y <= 112) {
-    if (!martDecorTab) { martDecorTab = true; martPage = 0; sfxPlay(SFX_TAP); }
+    if (!martDecorTab) { martDecorTab = true; martPage = 0; martScroll=0; sfxPlay(SFX_TAP); }
     return;
   }
   const uint8_t n = martDecorTab ? martDecorCount() : martSellableCount();
-  for (uint8_t i = 0; i < MART_PER_PAGE; ++i) {
-    const uint8_t idx = (uint8_t)(martPage * MART_PER_PAGE + i);
-    if (idx >= n) break;
-    const int ry = MART_ROW_Y(i);
-    if (x < 76 || x > 390 || y < ry || y > ry + 50) continue;
+  int idx=uiListIndexAt(y,210,390,60,50,martScroll,n);
+  if (idx>=0 && x>=76 && x<=390) {
     const uint8_t id = martDecorTab ? martDecorAt(idx) : martKeyAt(idx);
     const uint16_t price = martDecorTab ? decorDef(id).price : itemEntry(id).price;
     if (pet.wallet < price || (martDecorTab && (decor.owns(id) || !decorSaveHealthy()))) {
@@ -7211,7 +7457,7 @@ void martTap(int16_t x, int16_t y) {
     sfxPlay(SFX_TAP);
     return;
   }
-  uiTileGo(TILE_PET);
+  if(y>=404&&x>=173&&x<=293)uiTileGo(TILE_PET);
 }
 
 // ---------- wild encounters ----------
@@ -7267,6 +7513,7 @@ bool startWildBattle(uint8_t region, bool hard) {
   btlFoeAt = 0;
   btlFoeSquadN = 0;
   btlMsgCount = 0;
+  btlItemTurnPending = false;
   btlOver = false;
   btlWon = false;
   btlMenu = 0;
@@ -7317,45 +7564,41 @@ static uint8_t trainPct(uint8_t cur, uint8_t cap) {
 }
 
 void renderTrain() {
-  for (int y = 0; y < 466; y += 2)
-    gfx->drawFastHLine(0, y, 466, gNight ? 0x0000 : 0x2104);
-
-  gfx->fillRoundRect(TRAIN_X, TRAIN_Y, TRAIN_W, TRAIN_H, 18, UI_WHITE);
-  gfx->drawRoundRect(TRAIN_X, TRAIN_Y, TRAIN_W, TRAIN_H, 18, UI_INK);
-
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(T(S_TRAIN)) * 6, TRAIN_Y + 20);
-  gfx->print(T(S_TRAIN));
+  gbaBackdrop(gfx, GBA_WATER, GBA_MIST);
+  gbaFrame(gfx, TRAIN_X, TRAIN_Y, TRAIN_W, TRAIN_H,
+           GBA_PAPER, GBA_TEAL);
+  gbaRibbon(gfx, T(S_TRAIN), 133, TRAIN_Y + 6, 200, 37, GBA_BLUE, 2);
 
   const char *lbl[3] = { T(S_TR_ATK), T(S_TR_SPE), T(S_TR_DEF) };
   uint8_t cur[3] = { pet.trAtk, pet.trSpe, pet.trDef };
   uint8_t cap[3] = { pet.trMaxAtk(), pet.trMaxSpe(), pet.trMaxDef() };
-
+  const uint16_t accent[3] = { GBA_RED, GBA_YELLOW, GBA_GREEN };
   for (int i = 0; i < 3; i++) {
     int y = TRAIN_ROW_Y(i);
-    bool passive = false;      // every row opens a game now, DEF included
-    gfx->fillRoundRect(TRAIN_X + 18, y, TRAIN_W - 36, TRAIN_ROW_H, 12,
-                       passive ? UI_TRACK : UI_BG_DAY);
-    gfx->drawRoundRect(TRAIN_X + 18, y, TRAIN_W - 36, TRAIN_ROW_H, 12, UI_INK);
-    gfx->setTextColor(UI_INK);
+    gbaFrame(gfx, TRAIN_X + 18, y, TRAIN_W - 36,
+             TRAIN_ROW_H, GBA_CREAM, accent[i]);
+    gfx->setTextColor(GBA_NAVY);
     gfx->setTextSize(2);
-    gfx->setCursor(TRAIN_X + 32, y + 10);
+    gfx->setCursor(TRAIN_X + 34, y + 8);
     gfx->print(lbl[i]);
-
+    char counts[20];
+    snprintf(counts, sizeof(counts), "%u/%u", (unsigned)cur[i],
+             (unsigned)cap[i]);
+    gfx->setTextSize(1);
+    gfx->setCursor(TRAIN_X + TRAIN_W - 45 - (int)strlen(counts) * 6,
+                   y + 12);
+    gfx->print(counts);
     uint8_t pct = trainPct(cur[i], cap[i]);
-    int bx = TRAIN_X + 32, bw = TRAIN_W - 64, bh = 12, by = y + 34;
-    gfx->fillRoundRect(bx, by, bw, bh, 4, UI_TRACK);
+    int bx = TRAIN_X + 32, bw = TRAIN_W - 64, by = y + 36;
+    gfx->fillRoundRect(bx, by, bw, 10, 4, GBA_NAVY);
+    gfx->fillRoundRect(bx + 2, by + 2, bw - 4, 6, 3, GBA_PAPER);
     int fw = (bw - 4) * pct / 100;
-    if (fw > 0)
-      gfx->fillRoundRect(bx + 2, by + 2, fw, bh - 4, 3, pct >= 100 ? UI_BAR_OK : UI_BAR_WARN);
+    if (fw > 0) gfx->fillRoundRect(bx + 2, by + 2, fw, 6, 3,
+                                  pct >= 100 ? GBA_GREEN : accent[i]);
   }
-
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(1);
-  gfx->setCursor(CX - (int)strlen(T(S_TR_DEF_HINT)) * 3, TRAIN_Y + TRAIN_H - 22);
-  gfx->print(T(S_TR_DEF_HINT));
-  gfx->flush();   // without this the panel never updates and the screen freezes
+  ui7Centered(CX, TRAIN_Y + TRAIN_H - 17, T(S_TR_DEF_HINT),
+              TRAIN_W - 26, 1, GBA_SHADOW);
+  gfx->flush();
 }
 
 // ---------- the box ----------
@@ -7363,23 +7606,16 @@ void renderTrain() {
 // and then a box slot, which swaps them -- so one gesture covers deposit,
 // withdraw and exchange rather than needing three.
 void renderBox() {
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
+  gbaBackdrop(gfx, GBA_WATER, GBA_MIST);
   char head[32];
   snprintf(head, sizeof(head), T(S_BOX_FMT), party.boxCount(), BOX_SLOTS);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(head) * 6, 40);
-  gfx->print(head);
+  gbaRibbon(gfx, head, 124, 29, 218, 40, GBA_BLUE, 2);
   if (boxSwapFrom) {
     const PartyMon &p = party.slots[boxSwapFrom - 1];
     char sub[40];
     snprintf(sub, sizeof(sub), T(S_BOX_SWAP),
              p.empty() ? "-" : (p.nick[0] ? p.nick : DEX_TBL[p.dex].name));
-    gfx->setTextColor(UI_INK);
-    gfx->setTextSize(1);
-    gfx->setCursor(CX - (int)strlen(sub) * 3, PSLOT_PROMPT_Y);
-    gfx->print(sub);
+    ui7Centered(CX, PSLOT_PROMPT_Y, sub, 288, 1, GBA_RED);
   }
   for (uint8_t i = 0; i < BOX_PER_PAGE; i++) {
     uint8_t idx = boxPage * BOX_PER_PAGE + i;
@@ -7392,10 +7628,8 @@ void renderBox() {
              (unsigned)(BOX_SLOTS / BOX_PER_PAGE));
     drawPartyHub(pg, T(S_BOX_BTN), boxSwapFrom != 0);
   }
-  gfx->setTextColor(UI_INK_SOFT);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - strlen(T(S_BACK)) * 6, 392);
-  gfx->print(T(S_BACK));
+  gbaFrame(gfx, 132, 377, 202, 44, GBA_CREAM, GBA_BLUE);
+  ui7Centered(CX, 390, T(S_BACK), 178, 2, GBA_NAVY);
   uiChrome();
   gfx->flush();
 }
@@ -7464,130 +7698,143 @@ void boxTap(int16_t x, int16_t y) {
 void drawPartySlot(int i, const PartyMon &m) {
   int cx, cy;
   partySlotPos(i, &cx, &cy);
-  gfx->fillCircle(cx, cy, PSLOT_R, m.empty() ? UI_TRACK : UI_WHITE);
-  gfx->drawCircle(cx, cy, PSLOT_R, UI_INK);
-  gfx->drawCircle(cx, cy, PSLOT_R - 1, UI_INK);
+  // Preserve the 100px touch disc, but render it as a dual-ring GBA token.
+  const uint16_t ring = (i == 0 && !m.empty()) ? GBA_YELLOW : GBA_TEAL;
+  gfx->fillCircle(cx, cy, PSLOT_R, GBA_NAVY);
+  gfx->fillCircle(cx, cy, PSLOT_R - 3, ring);
+  gfx->fillCircle(cx, cy, PSLOT_R - 7, m.empty() ? GBA_PAPER : GBA_WHITE);
+  gfx->drawCircle(cx, cy, PSLOT_R - 9, GBA_MIST);
   if (m.empty()) {
-    gfx->setTextColor(0x8410);
+    const char *empty = T(S_PARTY_EMPTY);
+    gfx->setTextColor(GBA_SHADOW);
     gfx->setTextSize(2);
-    gfx->setCursor(cx - (int)strlen(T(S_PARTY_EMPTY)) * 6, cy - 8);
-    gfx->print(T(S_PARTY_EMPTY));
+    gfx->setCursor(cx - (int)strlen(empty) * 6, cy - 10);
+    gfx->print(empty);
     return;
   }
   const uint8_t *th = thumbs.get(m.dex);
-  if (th) drawThumb(th, cx - 24, cy - 44, 1, false);
+  // drawThumb uses an 80px logical cell, NOT the sprite's pixel bounds.
+  // Anchor that whole cell at the slot centre or the sprite drifts right.
+  // Double-size small thumbnails where they still fit in the 40px art area.
+  // Some source thumbs are already 40x40: scaling those would spill over
+  // the name, the circle border and even neighbouring party slots.
+  if (th && th[0] && th[1]) {
+    int artScale = (th[0] <= 20 && th[1] <= 20) ? 2 : 1;
+    drawThumb(th, cx - 40, cy - 62, artScale, false);
+  }
   const DexEntry &d = DEX_TBL[m.dex];
-  const char *nm = m.nick[0] ? m.nick : d.name;
-  gfx->setTextColor(d.accent);
+  const char *src = m.nick[0] ? m.nick : d.name;
+  char nm[14];
+  snprintf(nm, sizeof(nm), "%.13s", src);
+  // Name and level have separate bands. Previously the 2x level glyphs
+  // extended through the green ACTIVE label at the bottom of this circle.
+  gfx->fillRoundRect(cx - 44, cy - 2, 88, 15, 3, GBA_MIST);
+  gfx->drawRoundRect(cx - 44, cy - 2, 88, 15, 3, GBA_WATER);
+  gfx->setTextColor(GBA_NAVY);
   gfx->setTextSize(1);
-  gfx->setCursor(cx - (int)strlen(nm) * 3, cy + 8);
+  gfx->setCursor(cx - (int)strlen(nm) * 3, cy + 1);
   gfx->print(nm);
   if (m.shiny) {
-    gfx->setTextColor(UI_BAR_WARN);
-    gfx->setCursor(cx + (int)strlen(nm) * 3 + 3, cy + 8);
+    // Put the shiny indicator by the sprite, not on top of long nicknames.
+    gfx->setTextColor(GBA_RED);
+    gfx->setCursor(cx + 24, cy - 35);
     gfx->print("*");
   }
   char lv[12];
   snprintf(lv, sizeof(lv), T(S_LVL_FMT), (unsigned)m.level);
-  gfx->setTextColor(UI_INK);
+  // A six-character 'Lv.100' stays 72px wide at 2x and fits this band.
+  gfx->setTextColor(GBA_NAVY);
   gfx->setTextSize(2);
-  gfx->setCursor(cx - (int)strlen(lv) * 6, cy + 20);
+  gfx->setCursor(cx - (int)strlen(lv) * 6, cy + 15);
   gfx->print(lv);
 }
+
 
 // The hub in the middle of the ring. On the party it is the BOX button; in the
 // box it is the page. Either way the centre of a round panel is the easiest
 // place on it to hit, so the primary action belongs there.
 void drawPartyHub(const char *top, const char *bot, bool armed) {
-  gfx->fillCircle(CX, PSLOT_CY, PSLOT_HUB_R, armed ? UI_BAR_WARN : UI_BG_DAY);
-  gfx->drawCircle(CX, PSLOT_CY, PSLOT_HUB_R, UI_INK);
-  gfx->drawCircle(CX, PSLOT_CY, PSLOT_HUB_R - 1, UI_INK);
-  gfx->setTextColor(UI_INK);
+  gfx->fillCircle(CX, PSLOT_CY + 2, PSLOT_HUB_R, GBA_NAVY);
+  gfx->fillCircle(CX, PSLOT_CY, PSLOT_HUB_R - 2, armed ? GBA_YELLOW : GBA_BLUE);
+  gfx->fillCircle(CX, PSLOT_CY, PSLOT_HUB_R - 7, GBA_CREAM);
+  gfx->drawCircle(CX, PSLOT_CY, PSLOT_HUB_R - 10, GBA_TEAL);
+  gfx->setTextColor(GBA_NAVY);
   gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(top) * 6, PSLOT_CY - 14);
+  gfx->setCursor(CX - (int)strlen(top) * 6, PSLOT_CY - 16);
   gfx->print(top);
   gfx->setTextSize(1);
-  gfx->setCursor(CX - (int)strlen(bot) * 3, PSLOT_CY + 10);
+  gfx->setCursor(CX - (int)strlen(bot) * 3, PSLOT_CY + 8);
   gfx->print(bot);
 }
 
-void renderParty() {
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
 
+void renderParty() {
+  gbaBackdrop(gfx, GBA_WATER, GBA_MIST);
+  // The first disc remains the live Pokémon; five other party slots remain.
   char head[24];
   snprintf(head, sizeof(head), T(S_PARTY_FMT),
            (unsigned)(party.count() + (!pet.isEgg() ? 1 : 0)));
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(3);
-  gfx->setCursor(CX - (int)strlen(head) * 9, 42);
-  gfx->print(head);
+  gbaRibbon(gfx, head, 122, 26, 222, 39, GBA_BLUE, 2);
 
-  // the box lives behind the hub in the middle of the ring; it also shows how
-  // full it is, so the player knows there is anything in there without opening
   if (!partyPick) {
     char bl[24];
     snprintf(bl, sizeof(bl), "%u/%u", party.boxCount(), BOX_SLOTS);
     drawPartyHub(bl, T(S_BOX_BTN), boxSwapFrom != 0);
   }
-
   if (boxSel) {
     const PartyMon &b = party.box[boxSel - 1];
     char sw[44];
     snprintf(sw, sizeof(sw), T(S_BOX_SWAP),
              b.nick[0] ? b.nick : DEX_TBL[b.dex].name);
-    gfx->setTextColor(UI_INK);
+    gfx->setTextColor(GBA_NAVY);
     gfx->setTextSize(1);
     gfx->setCursor(CX - (int)strlen(sw) * 3, PSLOT_PROMPT_Y);
     gfx->print(sw);
   }
-
-  // when a newcomer is waiting, say so instead of the usual hint. The urgency
-  // is carried by the red CLOSE button below, not by tinting the sentence:
-  // UI_BAR_BAD as small text on cream is 3.2:1.
   if (partyPick) {
-    gfx->setTextColor(UI_INK);
+    gfx->setTextColor(GBA_NAVY);
     gfx->setTextSize(1);
     gfx->setCursor(CX - (int)strlen(T(S_PARTY_FULL)) * 3, PSLOT_PROMPT_Y);
     gfx->print(T(S_PARTY_FULL));
   }
-
-  // The active pet is a real party member, not a seventh creature.
-  // Keep the existing six-slot geometry and 6-slot save format unchanged.
   if (!pet.isEgg()) {
     PartyMon active = pet.toPartyMon();
     drawPartySlot(0, active);
     int ax, ay;
     partySlotPos(0, &ax, &ay);
-    gfx->fillRoundRect(ax - 27, ay + 37, 54, 13, 4, UI_BAR_OK);
-    gfx->setTextColor(UI_WHITE);
+    gfx->fillRoundRect(ax - 30, ay + 35, 60, 15, 4, GBA_GREEN);
+    gfx->drawRoundRect(ax - 30, ay + 35, 60, 15, 4, GBA_NAVY);
+    gfx->setTextColor(GBA_WHITE);
     gfx->setTextSize(1);
-    gfx->setCursor(ax - 18, ay + 39);
+    gfx->setCursor(ax - 18, ay + 38);
     gfx->print("ACTIVE");
   } else {
     int ax, ay;
     partySlotPos(0, &ax, &ay);
-    gfx->fillCircle(ax, ay, PSLOT_R, UI_TRACK);
-    gfx->drawCircle(ax, ay, PSLOT_R, UI_INK);
-    gfx->setTextColor(UI_INK_SOFT);
+    gfx->fillCircle(ax, ay, PSLOT_R, GBA_NAVY);
+    gfx->fillCircle(ax, ay, PSLOT_R - 4, GBA_CREAM);
+    gfx->setTextColor(GBA_NAVY);
     gfx->setTextSize(2);
     gfx->setCursor(ax - 18, ay - 8);
     gfx->print("EGG");
   }
   for (int i = 0; i < PARTY_BENCH_SLOTS; i++) drawPartySlot(i + 1, party.slots[i]);
   if (!party.slots[PARTY_BENCH_SLOTS].empty()) {
-    gfx->setTextColor(UI_BAR_BAD);
+    gfx->setTextColor(GBA_RED);
     gfx->setTextSize(1);
     gfx->setCursor(121, PSLOT_PROMPT_Y);
     gfx->print("LEGACY EXTRA: FREE BOX SPACE");
   }
 
-  // exit: an explicit button, always in the same place
   const char *ex = partyPick ? T(S_PARTY_LETGO) : T(S_CLOSE);
-  gfx->fillRoundRect(PARTYCLOSE_X, PARTYCLOSE_Y, PARTYCLOSE_W, PARTYCLOSE_H, 12,
-                     partyPick ? UI_BAR_BAD : UI_TRACK);
-  gfx->drawRoundRect(PARTYCLOSE_X, PARTYCLOSE_Y, PARTYCLOSE_W, PARTYCLOSE_H, 12, UI_INK);
-  gfx->setTextColor(partyPick ? UI_WHITE : UI_INK);
+  gfx->fillRoundRect(PARTYCLOSE_X, PARTYCLOSE_Y + 3, PARTYCLOSE_W,
+                     PARTYCLOSE_H, 8, GBA_NAVY);
+  gfx->fillRoundRect(PARTYCLOSE_X + 2, PARTYCLOSE_Y + 1,
+                     PARTYCLOSE_W - 4, PARTYCLOSE_H - 4, 7,
+                     partyPick ? GBA_RED : GBA_BLUE);
+  gfx->drawRoundRect(PARTYCLOSE_X + 4, PARTYCLOSE_Y + 3,
+                     PARTYCLOSE_W - 8, PARTYCLOSE_H - 8, 6, GBA_WHITE);
+  gfx->setTextColor(GBA_WHITE);
   gfx->setTextSize(2);
   gfx->setCursor(CX - (int)strlen(ex) * 6, PARTYCLOSE_Y + 14);
   gfx->print(ex);
@@ -7618,42 +7865,30 @@ void openKeyboardFor(uint8_t target) {
 void openKeyboard() { openKeyboardFor(KB_PET); }
 
 void renderKeyboard() {
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(2);
+  gbaBackdrop(gfx, GBA_WATER, GBA_MIST);
   const char *title = kbTarget == KB_TRAINER ? "TRAINER NAME" : T(S_NAME);
-  gfx->setCursor(CX - strlen(title) * 6, 56);
-  gfx->print(title);
+  gbaRibbon(gfx, title, 98, 31, 270, 43, GBA_BLUE, 2);
   if (kbOnboarding) {
     const char *hint = "What's your name, Trainer?";
-    gfx->setTextColor(UI_INK_SOFT);
-    gfx->setTextSize(1);
-    gfx->setCursor(CX - strlen(hint) * 3, 73);
-    gfx->print(hint);
+    ui7Centered(CX, 75, hint, 296, 1, GBA_TEAL);
   }
   // buffer actual
-  gfx->fillRoundRect(83, 84, 300, 40, 8, UI_WHITE);
-  gfx->drawRoundRect(83, 84, 300, 40, 8, UI_INK);
-  gfx->setTextSize(3);
-  gfx->setCursor(95, 94);
-  gfx->print(nameLen ? nameBuf : "_");
+  gbaFrame(gfx, 83, 90, 300, 43, GBA_CREAM, GBA_TEAL);
+  ui7Centered(CX, 99, nameLen ? nameBuf : "_", 272, 3, GBA_NAVY);
 
   for (int i = 0; i < 30; i++) {
     int x = KB_X + (i % KB_COLS) * KB_W, y = KB_Y + (i / KB_COLS) * KB_H;
-    bool special = (i >= 28);
-    gfx->fillRoundRect(x, y, KB_W - 6, KB_H - 6, 6, special ? UI_BAR_WARN : UI_WHITE);
-    gfx->drawRoundRect(x, y, KB_W - 6, KB_H - 6, 6, UI_INK);
-    gfx->setTextColor(UI_INK);
-    gfx->setTextSize(2);
-    if (i < 28) {
-      gfx->setCursor(x + KB_W / 2 - 9, y + KB_H / 2 - 10);
-      gfx->print(KB_KEYS[i]);
-    } else {
-      const char *lab = (i == 28) ? "<-" : "OK";
-      gfx->setCursor(x + KB_W / 2 - 15, y + KB_H / 2 - 10);
-      gfx->print(lab);
-    }
+    const bool special = (i >= 28);
+    const uint16_t accent = i == 29 ? GBA_GREEN : special ? GBA_YELLOW :
+                            (i / KB_COLS) % 2 ? GBA_TEAL : GBA_BLUE;
+    gbaFrame(gfx, x, y, KB_W - 6, KB_H - 6,
+             special ? GBA_MIST : GBA_CREAM, accent);
+    char key[3] = {0, 0, 0};
+    if (i < 28) { key[0] = KB_KEYS[i]; }
+    else if (i == 28) { key[0] = '<'; key[1] = '-'; }
+    else { key[0] = 'O'; key[1] = 'K'; }
+    ui7Centered(x + (KB_W - 6) / 2, y + 15, key,
+                KB_W - 14, 2, GBA_NAVY);
   }
   gfx->flush();
 }
@@ -7704,85 +7939,62 @@ void drawThumb(const uint8_t *b, int x, int y, int s, bool sil) {
 }
 
 void renderGallery() {
-  if (galleryDetail) {  // vista detalle: se redibuja siempre (animada)
-    gfx->fillScreen(RGB565_BLACK);
-    gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
-    const DexEntry &d = DEX_TBL[galleryDetail];
-    bool reg = pet.isRegistered(galleryDetail);
-    char head[24];
-    snprintf(head, sizeof(head), "N.%03d %s%s", galleryDetail,
-             pet.isShinyRegistered(galleryDetail) ? "*" : "", reg ? d.name : "???");
-    gfx->setTextColor(reg ? d.accent : UI_INK);
-    int glen = strlen(head);
-    int gts = (glen <= 13) ? 3 : 2;  // auto-encoge nombres largos (no caben a t3)
-    gfx->setTextSize(gts);
-    gfx->setCursor(CX - glen * (gts == 3 ? 9 : 6), gts == 3 ? 56 : 60);
-    gfx->print(head);
-    if (galleryPmd.loaded) {
-      // animado y a color si esta registrado; silueta estatica si no (estilo "?")
-      drawPmdActM(galleryPmd, PMD_IDLE, CX, 300, reg ? millis() : 0, true, !reg, 6);
+  if(galleryDetail) {
+    gbaBackdrop(gfx,GBA_WATER,GBA_MIST);
+    const DexEntry &d=DEX_TBL[galleryDetail];
+    const bool reg=pet.isRegistered(galleryDetail);
+    char head[34];
+    snprintf(head,sizeof(head),"N.%03d %s%s",galleryDetail,
+             pet.isShinyRegistered(galleryDetail)?"*":"",reg?d.name:"???");
+    gbaRibbon(gfx,head,114,30,238,45,GBA_BLUE,strlen(head)>17?1:2);
+    gbaFrame(gfx,83,95,300,300,GBA_CREAM,reg?GBA_GREEN:GBA_SHADOW);
+    gfx->fillRoundRect(101,111,264,255,8,GBA_MIST);
+    gfx->drawRoundRect(101,111,264,255,8,GBA_TEAL);
+    gfx->fillRoundRect(119,334,228,30,6,GBA_CREAM);
+    gfx->drawRoundRect(119,334,228,30,6,GBA_TEAL);
+    if(galleryPmd.loaded) {
+      drawPmdActM(galleryPmd,PMD_IDLE,CX,291,reg?millis():0,true,!reg,5);
     } else {
-      const uint8_t *t = thumbs.get(galleryDetail);
-      if (t) drawThumb(t, CX - GAL_CELL, 135, 4, !reg);
+      const uint8_t *th=thumbs.get(galleryDetail);
+      if(th) drawThumb(th,CX-GAL_CELL/2,162,3,!reg);
     }
-    gfx->setTextColor(UI_INK);
-    gfx->setTextSize(2);
-    gfx->setCursor(CX - strlen(T(S_DETAIL_BACK)) * 6, 408);
-    gfx->print(T(S_DETAIL_BACK));
+    gbaP5Text(CX,341,reg?"REGISTERED":"NOT REGISTERED",1,
+              reg?GBA_GREEN:GBA_SHADOW);
+    gbaRibbon(gfx,"BACK",168,406,130,32,GBA_BLUE,2);
     uiChrome();
     gfx->flush();
     return;
   }
-
-  if (!galleryDirty) return;  // la rejilla es estatica
-  galleryDirty = false;
-
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
-  // the region's own name and its own tally: "how much of Johto have I seen"
-  // is the question you are actually asking here
-  char head[32];
-  const RegionInfo &grg = REGIONS[galleryRegion % GAL_REGIONS];
-  snprintf(head, sizeof(head), "%s %u/%u", grg.name,
-           pet.registeredCountIn(grg.lo, grg.hi), (unsigned)GAL_SPAN);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(3);
-  gfx->setCursor(CX - strlen(head) * 9, 36);
-  gfx->print(head);
-
-  for (int r = 0; r < 4; r++) {
-    for (int c = 0; c < 4; c++) {
-      int16_t dex = GAL_LO + galleryPage * GAL_PER_PAGE + r * 4 + c;
-      if (dex > GAL_HI || dex > DEX_COUNT) break;
-      int x = GAL_X + c * GAL_CELL, y = GAL_Y + r * GAL_CELL;
-      const uint8_t *t = thumbs.get(dex);
-      if (t) {
-        drawThumb(t, x, y, 2, !pet.isRegistered(dex));
-        if (pet.isShinyRegistered(dex)) {
-          gfx->setTextColor(UI_BAR_WARN);
-          gfx->setTextSize(2);
-          gfx->setCursor(x + 62, y + 4);
-          gfx->print("*");
-        }
-      } else {
-        char num[6];
-        snprintf(num, sizeof(num), "%d", dex);
-        gfx->setTextColor(UI_INK_SOFT);
-        gfx->setTextSize(2);
-        gfx->setCursor(x + 24, y + 32);
-        gfx->print(num);
-      }
+  if(!galleryDirty) return;  // list remains static until navigation
+  galleryDirty=false;
+  gbaBackdrop(gfx,GBA_WATER,GBA_MIST);
+  char head[40];
+  const RegionInfo &region=REGIONS[galleryRegion%GAL_REGIONS];
+  snprintf(head,sizeof(head),"%s %u/%u",region.name,
+           pet.registeredCountIn(region.lo,region.hi),(unsigned)GAL_SPAN);
+  gbaRibbon(gfx,head,122,27,222,42,GBA_BLUE,strlen(head)>17?1:2);
+  galleryScroll=(int16_t)uiListClamp(galleryScroll);
+  for(int row=0;row<(GAL_SPAN+3)/4;row++) for(int col=0;col<4;col++) {
+    const int16_t dex=GAL_LO+row*4+col;
+    if(dex>GAL_HI||dex>DEX_COUNT) continue;
+    const int x=GAL_X+col*GAL_CELL,y=GAL_Y+row*GAL_CELL-galleryScroll;
+    if(y<GAL_Y||y+GAL_CELL>404)continue;
+    const bool registered=pet.isRegistered(dex);
+    gbaFrame(gfx,x+2,y+2,GAL_CELL-4,GAL_CELL-4,
+             registered?GBA_WHITE:GBA_PAPER,registered?GBA_GREEN:GBA_DISABLED);
+    const uint8_t *th=thumbs.get(dex);
+    if(th) drawThumb(th,x,y-7,2,!registered);
+    else gbaP5Text(x+GAL_CELL/2,y+21,"?",2,GBA_SHADOW);
+    gfx->fillRoundRect(x+9,y+57,62,15,3,registered?GBA_BLUE:GBA_SHADOW);
+    char label[9];snprintf(label,sizeof(label),"#%03u",(unsigned)dex);
+    gbaP5Text(x+GAL_CELL/2,y+59,label,1,GBA_WHITE);
+    if(pet.isShinyRegistered(dex)) {
+      gfx->setTextColor(GBA_RED);gfx->setTextSize(2);
+      gfx->setCursor(x+60,y+7);gfx->print("*");
     }
   }
-  // A page number, not a row of dots. 25 dots do not fit across the bottom of
-  // a round panel -- the chord at that height is only ~228 px -- and counting
-  // them to find where you are is worse than reading the number.
-  char pg[12];
-  snprintf(pg, sizeof(pg), "%d/%d", galleryPage + 1, (int)GAL_PAGES);
-  gfx->setTextColor(UI_INK_SOFT);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(pg) * 6, 410);
-  gfx->print(pg);
+  uiListDrawBar(84,404,(GAL_SPAN+3)/4,80,galleryScroll);
+  gbaRibbon(gfx,"BACK",182,406,102,30,GBA_BLUE,2);
   uiChrome();
   gfx->flush();
 }
@@ -7799,9 +8011,14 @@ void galleryTap(int16_t x, int16_t y) {
     galleryPmd.unload();
     return;
   }
-  int c = (x - GAL_X) / GAL_CELL, r = (y - GAL_Y) / GAL_CELL;
-  if (c < 0 || c > 3 || r < 0 || r > 3) return;
-  int16_t dex = GAL_LO + galleryPage * GAL_PER_PAGE + r * 4 + c;
+  if (y>=405) {
+    galleryPick=true;regionScroll=0;rpickPage=0;galleryDirty=true;return;
+  }
+  if(x<GAL_X||x>=GAL_X+4*GAL_CELL)return;
+  int c=(x-GAL_X)/GAL_CELL;
+  int r=uiListIndexAt(y,84,404,80,80,galleryScroll,(GAL_SPAN+3)/4);
+  if(r<0)return;
+  int16_t dex = GAL_LO + r * 4 + c;
   if (dex > GAL_HI || dex > DEX_COUNT) return;
   galleryDetail = dex;
   galleryPmd.load(dex, pet.isShinyRegistered(dex));
@@ -7847,16 +8064,20 @@ void drawSaveWarning() {
 }
 
 void drawHeader(const char *name, uint16_t nameColor, const char *msg) {
+  // Home remains a living biome scene; only the on-scene HUD gets GBA chrome.
+  // The header remains in the existing menu tap band (28..94).
+  const size_t nlen = strlen(name);
+  const uint8_t size = nlen > 21 ? 1 : 2;
+  gbaRibbon(gfx, name, 89, 32, 288, 40, GBA_BLUE, size);
+  gfx->fillRoundRect(110, 78, 246, 25, 6, GBA_NAVY);
+  gfx->fillRoundRect(112, 80, 242, 21, 4, GBA_CREAM);
+  const uint8_t sub = strlen(msg) > 18 ? 1 : 2;
+  gfx->setTextColor(GBA_NAVY);
+  gfx->setTextSize(sub);
+  gfx->setCursor(CX - (int)strlen(msg) * 3 * sub, 82 + (2-sub)*4);
+  gfx->print(msg);
   drawBattery();
   drawSaveWarning();
-  gfx->setTextColor(nameColor);
-  gfx->setTextSize(3);
-  gfx->setCursor(CX - strlen(name) * 9, HEADER_NAME_Y);
-  gfx->print(name);
-  gfx->setTextColor(inkColor());
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - strlen(msg) * 6, 90);
-  gfx->print(msg);
 }
 
 // animacion de la ceremonia (10s): despedida = reverencia con corazones y se
@@ -7935,34 +8156,21 @@ void uiConfirmRects(int *b1Top, int *b1Bot, int *b2Top, int *b2Bot) {
 void drawConfirmPanel(const char *q, const char *sub1, const char *sub2,
                       uint16_t subCol, const char *o1, uint16_t c1, uint16_t t1,
                       const char *o2, uint16_t c2, uint16_t t2) {
-  gfx->fillRoundRect(CONFIRM_X, CONFIRM_Y, CONFIRM_W, CONFIRM_H, 16, UI_WHITE);
-  gfx->drawRoundRect(CONFIRM_X, CONFIRM_Y, CONFIRM_W, CONFIRM_H, 16, UI_INK);
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(2);
-  gfx->setCursor(CX - (int)strlen(q) * 6, 176);
-  gfx->print(q);
-  if (sub1 || sub2) {
-    gfx->setTextSize(1);
-    gfx->setTextColor(subCol);
-    if (sub1) {
-      gfx->setCursor(CX - (int)strlen(sub1) * 3, sub2 ? 188 : 194);
-      gfx->print(sub1);
-    }
-    if (sub2) {
-      gfx->setCursor(CX - (int)strlen(sub2) * 3, 197);
-      gfx->print(sub2);
-    }
-    gfx->setTextSize(2);
-    gfx->setTextColor(UI_INK);
-  }
-  gfx->fillRoundRect(CONFIRM_BTN_X, CONFIRM_B1_Y, CONFIRM_BTN_W, CONFIRM_BTN_H, 12, c1);
-  gfx->setTextColor(t1);
-  gfx->setCursor(CX - (int)strlen(o1) * 6, CONFIRM_B1_Y + 18);
-  gfx->print(o1);
-  gfx->fillRoundRect(CONFIRM_BTN_X, CONFIRM_B2_Y, CONFIRM_BTN_W, CONFIRM_BTN_H, 12, c2);
-  gfx->setTextColor(t2);
-  gfx->setCursor(CX - (int)strlen(o2) * 6, CONFIRM_B2_Y + 18);
-  gfx->print(o2);
+  gbaFrame(gfx, CONFIRM_X, CONFIRM_Y, CONFIRM_W, CONFIRM_H,
+           GBA_PAPER, GBA_PURPLE);
+  ui7Centered(CX, 169, q, CONFIRM_W - 30, 2, GBA_NAVY);
+  if (sub1) ui7Centered(CX, sub2 ? 188 : 191, sub1,
+                        CONFIRM_W - 24, 1, subCol);
+  if (sub2) ui7Centered(CX, 198, sub2,
+                        CONFIRM_W - 24, 1, subCol);
+  gbaFrame(gfx, CONFIRM_BTN_X, CONFIRM_B1_Y, CONFIRM_BTN_W,
+           CONFIRM_BTN_H, GBA_CREAM, c1 == UI_BAR_BAD ? GBA_RED : GBA_GREEN);
+  ui7Centered(CX, CONFIRM_B1_Y + 16, o1,
+              CONFIRM_BTN_W - 24, 2, GBA_NAVY);
+  gbaFrame(gfx, CONFIRM_BTN_X, CONFIRM_B2_Y, CONFIRM_BTN_W,
+           CONFIRM_BTN_H, GBA_MIST, GBA_BLUE);
+  ui7Centered(CX, CONFIRM_B2_Y + 16, o2,
+              CONFIRM_BTN_W - 24, 2, GBA_NAVY);
 }
 
 void drawChoiceDialog() {
@@ -8401,16 +8609,29 @@ int uiCareArcTop(int i) {
 int uiHeaderNameBottom() { return HEADER_NAME_Y + HEADER_NAME_H; }
 
 static void drawCareArc(int i, const char *label, uint8_t val) {
+  // Four distinct GBA progress rails around the rim; geometry and touch
+  // targets are unchanged so existing accessibility checks still apply.
   int a0 = CARE_ARC[i][0], a1 = CARE_ARC[i][1];
-  uiArc(CX, CY, CARE_R, a0, a1, CARE_W, UI_TRACK);
-  if (val) uiArc(CX, CY, CARE_R, a0, a0 + (a1 - a0) * val / 100, CARE_W, CARE_COL[i]);
+  uiArc(CX, CY, CARE_R, a0, a1, CARE_W + 3, GBA_NAVY);
+  uiArc(CX, CY, CARE_R, a0, a1, CARE_W - 2, GBA_PAPER);
+  if (val) uiArc(CX, CY, CARE_R, a0, a0 + (a1 - a0) * val / 100,
+                 CARE_W - 2, CARE_COL[i]);
   float mid = ((float)(a0 + a1) / 2.0f - 90.0f) * 0.01745329f;
   int lx = CX + (int)(cosf(mid) * CARE_LBL_R);
   int ly = CY + (int)(sinf(mid) * CARE_LBL_R);
-  gfx->setTextColor(val < CARE_LOW ? UI_BAR_BAD : inkColor());
-  gfx->setTextSize(2);
-  gfx->setCursor(lx - (int)strlen(label) * 6, ly - 8);
-  gfx->print(label);
+  char lab[34];
+  snprintf(lab, sizeof(lab), "%.17s %u", label, (unsigned)val);
+  const uint8_t size = strlen(lab) > 11 ? 1 : 2;
+  const int width = (int)strlen(lab) * 6 * size + 14;
+  int x = lx - width / 2;
+  if (x < 9) x = 9;
+  if (x + width > 457) x = 457 - width;
+  gfx->fillRoundRect(x, ly - 12, width, 25, 5, GBA_NAVY);
+  gfx->fillRoundRect(x + 2, ly - 10, width - 4, 21, 3, val < CARE_LOW ? GBA_YELLOW : GBA_CREAM);
+  gfx->setTextColor(GBA_NAVY);
+  gfx->setTextSize(size);
+  gfx->setCursor(x + 7, ly - 4*size);
+  gfx->print(lab);
 }
 
 void drawBars() {
@@ -8421,12 +8642,23 @@ void drawBars() {
 }
 
 void drawButtons() {
-  for (int i = 0; i < BTN_COUNT; i++) {
-    bool off = uiButtonDisabled(i);   // durmiendo solo funciona LUZ
-    int bx = buttons[i].cx - BTN_HALF, by = buttons[i].cy - BTN_HALF;
-    if (!pet.sleeping) gfx->fillRoundRect(bx, by, 2 * BTN_HALF, 2 * BTN_HALF, 16, UI_WHITE);
-    gfx->drawRoundRect(bx, by, 2 * BTN_HALF, 2 * BTN_HALF, 16, inkColor());
-    if (!off) drawMap(buttons[i].icon, 16, buttons[i].cx - 16, buttons[i].cy - 16, 2, false);
+  static const char *const labels[BTN_COUNT] = { "FOOD", "LIGHT", "BATH", "TRAIN" };
+  static const uint16_t colors[BTN_COUNT] = { GBA_YELLOW, GBA_BLUE, GBA_TEAL, GBA_PURPLE };
+  for (int i = 0; i < BTN_COUNT; ++i) {
+    const bool off = uiButtonDisabled(i);
+    const int bx = buttons[i].cx - BTN_HALF, by = buttons[i].cy - BTN_HALF;
+    const uint16_t accent = off ? GBA_DISABLED : colors[i];
+    // A 72px GBA token inside each existing 94px circular hit target.
+    gfx->fillRoundRect(bx, by+3, 2*BTN_HALF, 2*BTN_HALF, 10, GBA_NAVY);
+    gfx->fillRoundRect(bx+2, by, 2*BTN_HALF-4, 2*BTN_HALF-4, 8, accent);
+    gfx->fillRoundRect(bx+5, by+4, 2*BTN_HALF-10, 2*BTN_HALF-15, 6,
+                       off ? GBA_PAPER : GBA_WHITE);
+    gfx->drawFastHLine(bx+10, by+5, 2*BTN_HALF-20, GBA_WHITE);
+    if (!off) drawMap(buttons[i].icon, 16, buttons[i].cx-16, buttons[i].cy-22, 2, false);
+    gfx->setTextColor(off ? GBA_SHADOW : GBA_NAVY);
+    gfx->setTextSize(1);
+    gfx->setCursor(buttons[i].cx - (int)strlen(labels[i])*3, buttons[i].cy+17);
+    gfx->print(labels[i]);
   }
 }
 

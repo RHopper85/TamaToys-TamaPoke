@@ -40,7 +40,7 @@ int main(){
   pet.gameHi = 33; pet.strHi = 21; pet.spdHi = 9;
   pet.bond = 77; pet.careMistakes = 2; pet.weight = 55;
   pet.dexReg[0] = 0x5A; pet.dexReg[9] = 0xC3; pet.dexShinyReg[3] = 0x11;
-  for (int i=0;i<PARTY_SLOTS;i++){ PartyMon m; m.dex=20+i*7; m.level=40+i;
+  for (int i=0;i<PARTY_BENCH_SLOTS;i++){ PartyMon m; m.dex=20+i*7; m.level=40+i;
     m.ivAtk=m.ivDef=m.ivSpe=m.ivHp=20+i; m.shiny=(i==2);
     snprintf(m.nick,sizeof(m.nick),"P%d",i);
     m.moves[0]=1+i; m.moves[1]=9; party.replaceAt(i,m); }
@@ -134,9 +134,10 @@ int main(){
   for (int i=0;i<MOVE_SLOTS;i++) if (p2.moves[i]!=pet.moves[i]) moves=false;
   ck(moves, "and the moveset");
 
-  ck(q2.count()==PARTY_SLOTS, "the whole party is back");
+  ck(q2.count()==PARTY_BENCH_SLOTS && q2.slots[PARTY_BENCH_SLOTS].empty(),
+     "the five banked members are back alongside the active pet");
   bool party_ok = true;
-  for (int i=0;i<PARTY_SLOTS;i++){
+  for (int i=0;i<PARTY_BENCH_SLOTS;i++){
     const PartyMon &m = q2.slots[i];
     if (m.dex != 20+i*7 || m.level != 40+i) party_ok = false;
     if (m.moves[0] != 1+i || m.moves[1] != 9) party_ok = false;

@@ -20,13 +20,18 @@ static void wifiLabel(const char *label, int y, uint8_t size = 2,
   gfx->print(label);
 }
 
+// Shared GBA styling for Settings and Wi-Fi. All touch regions remain defined
+// in their existing tap handlers; drawing changes must not alter them.
 static void wifiButton(int x, int y, int w, int h, const char *label,
                        bool selected = false, bool active = true,
                        uint8_t size = 2) {
-  uint16_t bg = !active ? UI_TRACK : selected ? UI_BAR_OK : UI_WHITE;
-  gfx->fillRoundRect(x, y, w, h, 11, bg);
-  gfx->drawRoundRect(x, y, w, h, 11, UI_INK);
-  gfx->setTextColor(selected && active ? UI_BG_DAY : UI_INK);
+  const uint16_t accent = !active ? GBA_SHADOW : selected ? GBA_GREEN : GBA_BLUE;
+  const uint16_t fill = !active ? GBA_DISABLED : selected ? GBA_MIST : GBA_CREAM;
+  gbaFrame(gfx, x, y, w, h, fill, accent);
+  // Keep long localized strings within the button, without changing the
+  // layout or the button's hit area.
+  while (size > 1 && (int)strlen(label) * 6 * size > w - 20) --size;
+  gfx->setTextColor(active ? GBA_NAVY : GBA_SHADOW);
   gfx->setTextSize(size);
   gfx->setCursor(x + (w - (int)strlen(label) * 6 * size) / 2,
                  y + (h - 8 * size) / 2);
@@ -34,9 +39,10 @@ static void wifiButton(int x, int y, int w, int h, const char *label,
 }
 
 static void wifiFrame(const char *title) {
-  gfx->fillScreen(RGB565_BLACK);
-  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
-  wifiLabel(title, 46, 3);
+  gbaBackdrop(gfx, GBA_WATER, GBA_MIST);
+  // Text is centered by the common ribbon helper, not a hardcoded offset.
+  const uint8_t scale = strlen(title) > 23 ? 1 : 2;
+  gbaRibbon(gfx, title, 98, 30, 270, 46, GBA_BLUE, scale);
 }
 
 static void wifiBackButton() {
@@ -110,9 +116,10 @@ static void renderResetConfirm() {
 void renderSettingsHub() {
   if (resetView != RESET_NONE) { renderResetConfirm(); return; }
   wifiFrame("SETTINGS");
-  wifiLabel("Device options", 87, 2, UI_INK_SOFT);
+  wifiLabel("DEVICE OPTIONS", 84, 1, GBA_TEAL);
   wifiButton(99, 105, 268, 43, "TIME / SOUND");
   wifiButton(99, 154, 268, 43, "WI-FI");
+  wifiLabel("SAVE MANAGEMENT", 202, 1, GBA_PURPLE);
   wifiButton(99, 220, 268, 43, "NEW GAME");
   wifiButton(99, 277, 268, 43, "FACTORY RESET");
   wifiButton(132, 382, 202, 34, "BACK");
@@ -194,7 +201,7 @@ void wifiBack() {
   } else {
     wifiOpen = false;
   }
-  wifiPage = 0;
+  wifiPage = 0;wifiScroll=0;
 }
 
 static const char *wifiStatusText() {
@@ -211,12 +218,14 @@ static const char *wifiStatusText() {
 
 static void renderWifiHome() {
   wifiFrame("WI-FI SETTINGS");
-  wifiLabel(wifiStatusText(), 93, 2,
-            TamaWifi::state() == TamaWifi::State::CONNECTED ? UI_BAR_OK : UI_INK_SOFT);
+  gbaFrame(gfx, 87, 82, 292, 48, GBA_CREAM,
+           TamaWifi::state() == TamaWifi::State::CONNECTED ? GBA_GREEN : GBA_TEAL);
+  wifiLabel(wifiStatusText(), 92, 2,
+            TamaWifi::state() == TamaWifi::State::CONNECTED ? GBA_GREEN : GBA_NAVY);
   if (TamaWifi::state() == TamaWifi::State::CONNECTED) {
     char name[25];
     snprintf(name, sizeof(name), "%.20s", TamaWifi::connectedName());
-    wifiLabel(name, 115, 1);
+    wifiLabel(name, 114, 1, GBA_TEAL);
   }
   wifiButton(89, 137, 288, 49,
              TamaWifi::enabled() ? "WI-FI: ON" : "WI-FI: OFF",
@@ -235,29 +244,30 @@ static void renderWifiHome() {
 #endif
 }
 
-static void wifiNetworkRow(int row, const char *ssid, bool secured,
+static void wifiNetworkRow(int y, const char *ssid, bool secured,
                            bool saved, int rssi) {
-  int y = WIFI_ROW_Y(row);
-  gfx->fillRoundRect(WIFI_ROW_X, y, WIFI_ROW_W, WIFI_ROW_H, 9, UI_WHITE);
-  gfx->drawRoundRect(WIFI_ROW_X, y, WIFI_ROW_W, WIFI_ROW_H, 9, UI_INK);
-  char shown[23];
-  snprintf(shown, sizeof(shown), "%.19s", ssid);
+  gbaFrame(gfx, WIFI_ROW_X, y, WIFI_ROW_W, WIFI_ROW_H,
+           GBA_CREAM, saved ? GBA_GREEN : GBA_BLUE);
+  char shown[21];
+  snprintf(shown, sizeof(shown), "%.18s", ssid);
   gfx->setTextSize(2);
-  gfx->setTextColor(UI_INK);
-  gfx->setCursor(WIFI_ROW_X + 10, y + 8);
+  gfx->setTextColor(GBA_NAVY);
+  gfx->setCursor(WIFI_ROW_X + 13, y + 7);
   gfx->print(shown);
   gfx->setTextSize(1);
-  gfx->setCursor(WIFI_ROW_X + 10, y + 31);
+  gfx->setCursor(WIFI_ROW_X + 13, y + 31);
+  gfx->setTextColor(GBA_TEAL);
   if (saved) gfx->print("SAVED  ");
   gfx->print(secured ? "SECURED" : "OPEN");
   if (rssi != 0) {
     char signal[13];
     snprintf(signal, sizeof(signal), "%d dBm", rssi);
-    gfx->setCursor(WIFI_ROW_X + WIFI_ROW_W - 67, y + 33);
+    gfx->setCursor(WIFI_ROW_X + WIFI_ROW_W - 80, y + 31);
     gfx->print(signal);
   }
+  gfx->setTextColor(GBA_BLUE);
   gfx->setTextSize(2);
-  gfx->setCursor(WIFI_ROW_X + WIFI_ROW_W - 24, y + 8);
+  gfx->setCursor(WIFI_ROW_X + WIFI_ROW_W - 25, y + 7);
   gfx->print(">");
 }
 
@@ -272,28 +282,22 @@ static void renderWifiList() {
     wifiLabel("Tap to connect or forget", 88, 1, UI_INK_SOFT);
   }
   int total = nearby ? TamaWifi::networkCount() : TamaWifi::savedCount();
-  uint8_t pages = wifiPages();
-  if (wifiPage >= pages) wifiPage = pages - 1;
+  wifiScroll=(int16_t)uiListClamp(wifiScroll);
   if (!total) {
     wifiLabel(nearby && TamaWifi::state() == TamaWifi::State::SCANNING ?
               "Searching..." : "No networks found", 224, 2, UI_INK_SOFT);
   }
-  for (int row = 0; row < WIFI_ROWS_PER_PAGE; ++row) {
-    int i = (int)wifiPage * WIFI_ROWS_PER_PAGE + row;
-    if (i >= total) break;
+  for (int i=0;i<total;i++) {
+    const int y=WIFI_ROW_Y(i)-wifiScroll;
+    if(y<119||y+WIFI_ROW_H>370)continue;
     if (nearby) {
       TamaWifi::Network n = TamaWifi::networkAt(i);
-      wifiNetworkRow(row, n.ssid, n.secure, n.saved, n.rssi);
+      wifiNetworkRow(y, n.ssid, n.secure, n.saved, n.rssi);
     } else {
-      wifiNetworkRow(row, TamaWifi::savedName(i), TamaWifi::savedSecure(i), true, 0);
+      wifiNetworkRow(y, TamaWifi::savedName(i), TamaWifi::savedSecure(i), true, 0);
     }
   }
-  if (pages > 1) {
-    char info[24];
-    snprintf(info, sizeof(info), "Page %d/%d - drag rim",
-             wifiPage + 1, pages);
-    wifiLabel(info, 377, 1, UI_INK_SOFT);
-  }
+  uiListDrawBar(119,370,total,62,wifiScroll);
   wifiBackButton();
   uiChrome();
 }
@@ -333,16 +337,15 @@ static void renderWifiPassword() {
   wifiFrame("PASSWORD");
   char ssid[27];
   snprintf(ssid, sizeof(ssid), "%.23s", wifiSelectedSsid);
-  wifiLabel(ssid, 77, 2);
-  gfx->fillRoundRect(77, 98, 312, 44, 10, UI_WHITE);
-  gfx->drawRoundRect(77, 98, 312, 44, 10, UI_INK);
+  wifiLabel(ssid, 82, 1, GBA_TEAL);
+  gbaFrame(gfx, 77, 98, 312, 44, GBA_WHITE, GBA_YELLOW);
   char shown[23];
   size_t start = wifiPassLen > 18 ? wifiPassLen - 18 : 0;
   for (size_t i = start; i < wifiPassLen; ++i)
     shown[i - start] = wifiShowPassword ? wifiPassword[i] : '*';
   shown[wifiPassLen - start] = '\0';
   gfx->setTextSize(2);
-  gfx->setTextColor(UI_INK);
+  gfx->setTextColor(GBA_NAVY);
   gfx->setCursor(88, 111);
   gfx->print(wifiPassLen ? shown : "_");
   wifiButton(315, 102, 68, 36, wifiShowPassword ? "HIDE" : "SHOW",
@@ -356,9 +359,10 @@ static void renderWifiPassword() {
     if ((size_t)i >= keyCount) break;
     int x = WIFI_KEY_X + (i % 8) * WIFI_KEY_STEP_X;
     int y = WIFI_KEY_Y + (i / 8) * WIFI_KEY_STEP_Y;
-    gfx->fillRoundRect(x, y, 41, 42, 5, UI_WHITE);
-    gfx->drawRoundRect(x, y, 41, 42, 5, UI_INK);
-    gfx->setTextColor(UI_INK);
+    gfx->fillRoundRect(x, y + 2, 41, 40, 5, GBA_NAVY);
+    gfx->fillRoundRect(x + 2, y, 37, 39, 4, GBA_CREAM);
+    gfx->drawRoundRect(x + 2, y, 37, 39, 4, GBA_TEAL);
+    gfx->setTextColor(GBA_NAVY);
     gfx->setTextSize(2);
     gfx->setCursor(x + 14, y + 13);
     char k[] = { keys[i], 0 };
@@ -371,7 +375,7 @@ static void renderWifiPassword() {
   wifiButton(196, 397, 75, 31, "DEL", false, true, 1);
   wifiButton(281, 397, 75, 31, "JOIN", true, true, 1);
   if (wifiMessageUntil > millis())
-    wifiLabel(wifiMessage, 438, 1, UI_BAR_BAD);
+    wifiLabel(wifiMessage, 438, 1, GBA_RED);
   else
     wifiLabel("Swipe down to cancel", 438, 1, UI_INK_SOFT);
 }
@@ -475,12 +479,12 @@ void wifiTap(int16_t x, int16_t y) {
     } else if (wifiHit(x, y, 89, 259, 288, 49)) {
       if (!TamaWifi::enabled()) { sfxPlay(SFX_DENY); return; }
       wifiView = WIFI_NEARBY;
-      wifiPage = 0;
+      wifiPage = 0;wifiScroll=0;
       TamaWifi::scan();
       sfxPlay(SFX_TAP);
     } else if (wifiHit(x, y, 89, 320, 288, 49)) {
       wifiView = WIFI_SAVED;
-      wifiPage = 0;
+      wifiPage = 0;wifiScroll=0;
       sfxPlay(SFX_TAP);
     }
     return;
@@ -488,13 +492,12 @@ void wifiTap(int16_t x, int16_t y) {
   if (wifiView == WIFI_NEARBY || wifiView == WIFI_SAVED) {
     if (wifiView == WIFI_NEARBY && wifiHit(x, y, 317, 76, 73, 32)) {
       TamaWifi::scan();
-      wifiPage = 0;
+      wifiPage = 0;wifiScroll=0;
       return;
     }
-    for (int row = 0; row < WIFI_ROWS_PER_PAGE; ++row) {
-      if (!wifiHit(x, y, WIFI_ROW_X, WIFI_ROW_Y(row),
-                   WIFI_ROW_W, WIFI_ROW_H)) continue;
-      int i = (int)wifiPage * WIFI_ROWS_PER_PAGE + row;
+    int total=wifiView==WIFI_NEARBY?TamaWifi::networkCount():TamaWifi::savedCount();
+    int i=uiListIndexAt(y,119,370,62,WIFI_ROW_H,wifiScroll,total);
+    if(i>=0&&wifiHit(x,y,WIFI_ROW_X,119,WIFI_ROW_W,251)) {
       if (wifiView == WIFI_NEARBY && i < TamaWifi::networkCount()) {
         wifiSelectNetwork(TamaWifi::networkAt(i));
         sfxPlay(SFX_TAP);

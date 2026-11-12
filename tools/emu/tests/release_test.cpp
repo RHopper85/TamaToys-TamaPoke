@@ -95,7 +95,7 @@ int main(){
     party.slots[0]=mon(25,30,"PIKA");
     party.save();
     partyOpen=true;
-    partyTap(SLOT_X(0), SLOT_Y(0));      // open its sheet
+    partyTap(SLOT_X(1), SLOT_Y(1));      // open its sheet
     ck(partyDetail==1, "tapping a party slot opens its sheet");
     ck(!releaseConfirm, "with no confirm up yet");
 
@@ -166,7 +166,7 @@ int main(){
     party.slots[0]=mon(25,30,"PIKA");
     party.save();
     partyOpen=true;
-    partyTap(SLOT_X(0), SLOT_Y(0));
+    partyTap(SLOT_X(1), SLOT_Y(1));
     ck(boxSwapFrom==1, "opening a sheet arms the swap side");
     partyTap(SHEET_R_X, SHEET_BTN_Y);
     partyTap(CONF_X, CONF_YES_Y);
@@ -188,7 +188,7 @@ int main(){
     if (!pet.isEgg()) { pet.newEgg(); }
     if (pet.awaitingStarter()) pet.chooseStarter(4);
     partyOpen = true;
-    partyTap(SLOT_X(0), SLOT_Y(0));
+    partyTap(SLOT_X(1), SLOT_Y(1));
     ck(partyDetail == 1, "the sheet opens with an egg waiting");
     partyTap(233, SHEET_BTN_Y);                  // dead centre
     ck(pet.speciesId == 3, "BRING BACK works when tapped at the panel centre");
@@ -224,7 +224,7 @@ int main(){
     ck(dimStage==0, "the panel is awake, so the gate is what is being tested");
     ck(!strcmp(SCREEN_NAME[uiCurrentScreen()],"party"), "and the party screen is up");
     confirmUntil=0; holdFired=false;
-    hold(SLOT_X(0), SLOT_Y(0), 3400);       // dead centre of party slot 0
+    hold(SLOT_X(1), SLOT_Y(1), 3400);       // dead centre of visual slot 1 (first banked member)
     ck(confirmUntil==0, "holding a party slot does NOT open the release dialog");
     ck(partyDetail==0 || !holdFired, "and it was a hold, not a tap that opened a sheet");
 

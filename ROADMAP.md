@@ -409,3 +409,8 @@ These are optional improvements rather than committed release requirements.
 - [ ] Create database migrations for profiles, devices, friendships, battles and turns.
 - [x] Deploy initial registration/profile API to IONOS MariaDB; deploy the deletion update next.
 - [ ] Configure secrets only on the host, never in firmware or GitHub.
+
+## GBA interface rollout — Patch 7 (2026-11-12)
+- [x] Restyle Friends, PC Box, Pokémon detail sheets, confirmation dialogs, first-run starters, name entry, training hub and training HUD/results with one consistent RGB565 GBA palette.
+- [ ] Verify layout and tap behavior on the physical 466x466 ESP32 display (especially localized names and the SD Pokémon thumbnails).
+- [ ] Complete the Windows emulator regression suite and review optional fine polish before finalizing the UI overhaul.

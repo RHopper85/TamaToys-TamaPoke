@@ -125,13 +125,19 @@ int main() {
   Party pty;
   pty.begin();
   bool aligned = true;
-  for (int i = 0; i < PARTY_SLOTS; i++) {
+  for (int i = 0; i < PARTY_BENCH_SLOTS; i++) {
     if (pty.slots[i].dex != 1 + i * 20 || pty.slots[i].level != 40 + i) aligned = false;
     printf("     slot %d: dex=%d lvl=%u nick=%s\n",
            i, pty.slots[i].dex, pty.slots[i].level, pty.slots[i].nick);
   }
-  ck(aligned, "legacy party blob migrates with slots still aligned");
-  ck(pty.count() == PARTY_SLOTS, "all 6 legacy members survive");
+  ck(aligned && pty.slots[PARTY_BENCH_SLOTS].empty(),
+     "legacy party blob migrates with five bench slots aligned");
+  const PartyMon &overflow = pty.box[0];
+  ck(pty.count() == PARTY_BENCH_SLOTS && pty.boxCount() == 1 &&
+     overflow.dex == 1+PARTY_BENCH_SLOTS*20 &&
+     overflow.level == 40+PARTY_BENCH_SLOTS &&
+     strcmp(overflow.nick, "OLD5") == 0,
+     "all 6 legacy members survive, with the sixth migrated to the PC");
 
   // The MOVE PICKER had its own gate and so its own opinion: it checked
   // learnLevel() alone, and a TM is stored as level 0, so a level 22 Charmeleon

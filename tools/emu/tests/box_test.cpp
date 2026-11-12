@@ -27,17 +27,24 @@ int main(){
     seed.end(); }
   Party p; p.begin();
   bool kept = true;
-  for (int i=0;i<PARTY_SLOTS;i++) if (p.slots[i].dex != 1+i*20) kept=false;
-  ck(kept, "a pre-box save keeps its whole party");
-  ck(p.boxCount()==0, "and comes up with an empty box, not garbage");
+  for (int i=0;i<PARTY_BENCH_SLOTS;i++)
+    if (p.slots[i].dex != 1+i*20) kept=false;
+  ck(kept && p.slots[PARTY_BENCH_SLOTS].empty(),
+     "legacy save retains five banked members without an invisible sixth");
+  ck(p.boxCount()==1 && p.box[0].dex==1+PARTY_BENCH_SLOTS*20,
+     "legacy sixth member is preserved in the PC Box");
+  Party reloaded; reloaded.begin();
+  ck(reloaded.box[0].dex==1+PARTY_BENCH_SLOTS*20 &&
+     reloaded.slots[PARTY_BENCH_SLOTS].empty(),
+     "overflow migration survives a reload without duplicating the member");
 
-  // deposit: party slot 0 <-> empty box slot 0
+  // deposit: party slot 0 <-> empty box slot 1 (box slot 0 holds overflow)
   int16_t was = p.slots[0].dex;
-  p.swapPartyBox(0, 0);
-  ck(p.box[0].dex==was && p.slots[0].empty(), "swapping into an empty box slot deposits");
+  p.swapPartyBox(0, 1);
+  ck(p.box[1].dex==was && p.slots[0].empty(), "swapping into an empty box slot deposits");
   // withdraw: the same call the other way round
-  p.swapPartyBox(0, 0);
-  ck(p.slots[0].dex==was && p.box[0].empty(), "and swapping back withdraws");
+  p.swapPartyBox(0, 1);
+  ck(p.slots[0].dex==was && p.box[1].empty(), "and swapping back withdraws");
 
   // a real exchange, both occupied
   p.box[3] = mk(150, 70);
@@ -49,13 +56,13 @@ int main(){
   Party q; q.begin();
   ck(q.slots[2].dex==b && q.box[3].dex==a, "the swap persists across a reload");
 
-  ck(p.boxFirstFree()==0, "boxFirstFree finds the hole");
+  ck(p.boxFirstFree()==1, "boxFirstFree finds the hole after the migrated member");
   for (int i=0;i<BOX_SLOTS;i++) p.box[i]=mk(19,5);
   ck(p.boxFirstFree()==-1 && !p.boxAdd(mk(1,1)), "a full box refuses more");
 
   // a farewell with a full party must reach the box rather than being stuck
   { Party r; r.begin();
-    for (int i=0;i<PARTY_SLOTS;i++) r.slots[i]=mk(1+i,40);
+    for (int i=0;i<PARTY_BENCH_SLOTS;i++) r.slots[i]=mk(1+i,40);
     for (int i=0;i<BOX_SLOTS;i++) r.box[i]=PartyMon();
     r.save(); r.boxSave();
     PartyMon newcomer = mk(150, 73);
@@ -67,6 +74,28 @@ int main(){
     for (int i=0;i<BOX_SLOTS;i++) r.box[i]=mk(19,5);
     ck(!r.add(newcomer) && !r.boxAdd(newcomer),
        "only a full party AND a full box refuses, which is when the player picks");
+  }
+
+  // A legacy six-banked save with a full box cannot migrate immediately.
+  // The overflow must remain intact until a PC slot becomes available.
+  {
+    Party r; r.begin();
+    for (int i=0;i<PARTY_SLOTS;i++) r.slots[i]=mk(10+i,40+i);
+    for (int i=0;i<BOX_SLOTS;i++) r.box[i]=mk(100+i,25);
+    r.save(); r.boxSave();
+    Party blocked; blocked.begin();
+    ck(blocked.slots[PARTY_BENCH_SLOTS].dex==10+PARTY_BENCH_SLOTS,
+       "full PC preserves the legacy sixth in its reserved storage slot");
+    ck(blocked.boxCount()==BOX_SLOTS,
+       "migration does not evict an existing boxed creature");
+    blocked.boxReleaseAt(BOX_SLOTS-1);  // creates room; triggers migration
+    ck(blocked.slots[PARTY_BENCH_SLOTS].empty() &&
+       blocked.box[BOX_SLOTS-1].dex==10+PARTY_BENCH_SLOTS,
+       "freeing a PC slot completes the protected migration");
+    Party done; done.begin();
+    ck(done.slots[PARTY_BENCH_SLOTS].empty() &&
+       done.box[BOX_SLOTS-1].dex==10+PARTY_BENCH_SLOTS,
+       "delayed migration survives a reload");
   }
 
   // withdrawing into a party that has room must not need a party slot picked

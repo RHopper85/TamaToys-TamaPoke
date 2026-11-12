@@ -63,7 +63,8 @@ static void friendPageFrame(const char *title) {
 
 static void friendPageHome() {
   friendPageFrame("FRIENDS");
-  wifiLabel("YOUR FRIEND CODE", 87, 2, UI_INK_SOFT);
+  gbaFrame(gfx, 82, 82, 302, 95, GBA_CREAM, GBA_TEAL);
+  wifiLabel("YOUR FRIEND CODE", 91, 2, GBA_TEAL);
   wifiLabel(TamaOnline::registered() ? TamaOnline::friendCode() : "NOT ASSIGNED", 119, 3);
   wifiLabel(TamaOnline::registered() ? "Your trainer account is saved" :
             TamaOnline::status(), 154, 1, UI_INK_SOFT);
@@ -78,20 +79,23 @@ static void friendPageHome() {
 
 static void friendPageList() {
   friendPageFrame("MY FRIENDS");
-  wifiLabel("Tap a trainer for details", 82, 1, UI_INK_SOFT);
+  wifiLabel("SELECT A TRAINER", 84, 1, GBA_TEAL);
   if (!friendPreviewCount) wifiLabel("No friends yet", 205, 2, UI_INK_SOFT);
   for (uint8_t i = 0; i < friendPreviewCount; ++i) {
     int y = 103 + i * 54;
-    wifiButton(81, y, 304, 48, "", false, true);
-    gfx->setTextColor(UI_INK);
+    gbaFrame(gfx, 81, y, 304, 48, GBA_CREAM,
+             (i % 2) ? GBA_TEAL : GBA_BLUE);
+    gfx->fillRect(89, y + 8, 6, 30,
+                  friendPreview[i].hoursAway < 24 ? GBA_GREEN : GBA_PURPLE);
+    gfx->setTextColor(GBA_NAVY);
     gfx->setTextSize(2);
-    gfx->setCursor(96, y + 5);
+    gfx->setCursor(104, y + 5);
     gfx->print(friendPreview[i].trainer);
     char activity[24];
     friendActivity(friendPreview[i].hoursAway, activity, sizeof(activity));
-    gfx->setTextColor(UI_INK_SOFT);
+    gfx->setTextColor(GBA_SHADOW);
     gfx->setTextSize(1);
-    gfx->setCursor(96, y + 30);
+    gfx->setCursor(104, y + 30);
     gfx->print(activity);
     gfx->setTextSize(2);
     gfx->setCursor(352, y + 14);
@@ -104,7 +108,8 @@ static void friendPageDetail() {
   friendPageFrame("TRAINER");
   if (friendSelected >= friendPreviewCount) { friendsView = FRIEND_LIST; return; }
   const FriendPreview &friendData = friendPreview[friendSelected];
-  wifiLabel(friendData.trainer, 105, 3);
+  gbaFrame(gfx, 82, 98, 302, 103, GBA_CREAM, GBA_BLUE);
+  wifiLabel(friendData.trainer, 108, 3, GBA_NAVY);
   wifiLabel(friendData.code, 144, 2, UI_INK_SOFT);
   char activity[24];
   friendActivity(friendData.hoursAway, activity, sizeof(activity));
@@ -117,8 +122,9 @@ static void friendPageDetail() {
 
 static void friendPageRemove() {
   friendPageFrame("REMOVE FRIEND?");
+  gbaFrame(gfx, 88, 129, 290, 79, GBA_CREAM, GBA_RED);
   if (friendSelected < friendPreviewCount)
-    wifiLabel(friendPreview[friendSelected].trainer, 148, 3);
+    wifiLabel(friendPreview[friendSelected].trainer, 145, 3, GBA_NAVY);
   wifiLabel("This is a demo preview", 190, 1, UI_INK_SOFT);
   wifiButton(98, 236, 270, 55, "YES, REMOVE", false);
   wifiButton(98, 305, 270, 55, "CANCEL", true);
@@ -127,8 +133,9 @@ static void friendPageRemove() {
 static void friendPageRequests() {
   friendPageFrame("REQUESTS");
   if (!friendDemoRequest) {
-    wifiLabel("No pending requests", 188, 2, UI_INK_SOFT);
+    wifiLabel("No pending requests", 188, 2, GBA_SHADOW);
   } else {
+    gbaFrame(gfx, 82, 103, 302, 91, GBA_CREAM, GBA_GREEN);
     wifiLabel("GARY (DEMO)", 126, 3);
     wifiLabel("Wants to be your friend", 171, 1, UI_INK_SOFT);
     wifiButton(98, 215, 270, 54, "ACCEPT", true);
@@ -147,13 +154,15 @@ static void friendPageAdd() {
   friendPageFrame("ADD FRIEND");
   wifiLabel("Enter a friend's code", 78, 1, UI_INK_SOFT);
   wifiButton(329, 65, 65, 34, "BACK", false, true, 1);
-  wifiButton(90, 91, 286, 44, "");
-  wifiLabel(friendCodeEntryLen ? friendCodeEntry : "_", 102, 2);
+  gbaFrame(gfx, 90, 91, 286, 44, GBA_CREAM, GBA_TEAL);
+  wifiLabel(friendCodeEntryLen ? friendCodeEntry : "_", 102, 2, GBA_NAVY);
   for (int i = 0; i < 36; ++i) {
     int x = FKEY_X + (i % 6) * FKEY_W;
     int y = FKEY_Y + (i / 6) * FKEY_H;
     char key[2] = { FRIEND_CODE_KEYS[i], 0 };
-    wifiButton(x, y, 48, 33, key);
+    gbaFrame(gfx, x, y, 48, 33, GBA_CREAM,
+             (i / 6) % 2 ? GBA_TEAL : GBA_BLUE);
+    ui7Centered(x + 24, y + 9, key, 34, 2, GBA_NAVY);
   }
   wifiButton(104, 376, 122, 49, "DELETE", false, true, 1);
   wifiButton(241, 376, 122, 49, "ADD", true);

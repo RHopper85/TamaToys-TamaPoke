@@ -565,24 +565,23 @@ int main(int argc, char **argv) {
   printf("PASS: hard mode keeps its own unlock order\n");
   gymHard = false; gymOpen = false; pet.badges = 0;
 
-  // ---- a live pet plus a FULL party is 7 candidates against a cap of 6. The
-  // 7th used to be counted but never drawn and never tappable, so FIGHT sat
-  // inert with no way to fix it.
+  // ---- a live pet plus five banked members is exactly six candidates.
+  // The active Pokemon occupies one of the six allowed party places.
   battleOpen = false; pickOpen = false;
-  for (int i = 0; i < PARTY_SLOTS; i++) { PartyMon m; m.dex = 9 + i * 10; m.level = 40;
+  for (int i = 0; i < PARTY_BENCH_SLOTS; i++) { PartyMon m; m.dex = 9 + i * 10; m.level = 40;
     m.ivAtk = m.ivDef = m.ivSpe = m.ivHp = 25; party.replaceAt(i, m); }
   pickTrainer = 0; pickHard = false; pickPage = 0;
   pickDefault(squadCap(0, false));
   printf("     candidates=%u chosen=%u cap=%u\n",
          pickCandidates(), pickChosen(), squadCap(0, false));
-  if (pickCandidates() != PARTY_SLOTS + 1) { printf("FAIL: expected 7 candidates\n"); return 1; }
-  printf("PASS: a live pet plus a full party is 7 candidates\n");
+  if (pickCandidates() != PARTY_SLOTS) { printf("FAIL: expected 6 candidates\n"); return 1; }
+  printf("PASS: active Pokemon plus five banked members is exactly 6 candidates\n");
   if (pickChosen() > squadCap(0, false)) {
     printf("FAIL: the picker opens over its own cap\n"); return 1; }
   printf("PASS: it opens with a valid selection, not everything\n");
   { uint8_t pages = (pickCandidates() + 6 - 1) / 6;
-    if (pages < 2) { printf("FAIL: 7 candidates must span 2 pages\n"); return 1; }
-    printf("PASS: the 7th is reachable on page %u of %u\n", pages, pages); }
+    if (pages != 1) { printf("FAIL: six candidates must fit on one page\n"); return 1; }
+    printf("PASS: all six candidates fit on one selectable page\n"); }
   for (int i = 0; i < PARTY_SLOTS; i++) party.releaseAt(i);
   squadMask = 0xFFFF;
 

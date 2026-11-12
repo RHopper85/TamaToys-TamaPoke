@@ -7,6 +7,7 @@
 #include "linknow.h"
 #include <cstdio>
 #include <string>
+#include <ctime>  // host wall clock persists while the emulator is closed
 
 // Baked in by build.sh from the repo location; --sprites <dir> overrides it.
 #ifndef SPRITE_DIR
@@ -137,7 +138,20 @@ bool sdSerialCommand(const String &) { return false; }
 
 // --- RTC / battery / PMU ---
 static uint32_t g_epoch = 0;
-bool rtcBegin() { return true; }
+bool rtcBegin() {
+  // The desktop emulator has no battery-backed RTC. A zero clock caused
+  // setup() to seed January 2026 again on EVERY launch, so persisted
+  // expeditions restarted or stayed at their full duration.
+  // Read the host wall clock once per emulator boot; millis() continues to
+  // advance game time while running (including --fast). On the ESP32 the
+  // separate rtcbat.cpp implementation still reads the physical PCF85063.
+  if (!g_epoch) {
+    const std::time_t wall = std::time(nullptr);
+    if (wall > 0 && (uint64_t)wall <= UINT32_MAX)
+      g_epoch = (uint32_t)wall - millis() / 1000;
+  }
+  return true;
+}
 uint32_t rtcEpoch() { return g_epoch + millis() / 1000; }
 void rtcSetEpoch(uint32_t e) { g_epoch = e - millis() / 1000; }
 bool batBegin() { return true; }
