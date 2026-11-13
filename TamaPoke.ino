@@ -58,7 +58,112 @@ Arduino_DataBus *bus = new Arduino_ESP32QSPI(
 Arduino_CO5300 *panel = new Arduino_CO5300(
   bus, LCD_RESET, 0 /*rotation*/, LCD_WIDTH, LCD_HEIGHT, 6, 0, 0, 0);
 // Framebuffer completo en PSRAM: dibujamos todo y hacemos flush() (sin parpadeo)
+// ESP32-only partial-screen transport. The ordinary Arduino_Canvas already
+// draws into a complete PSRAM framebuffer, but its flush() transmits all
+// 466x466 pixels every time (even if nothing has changed). On QSPI this can
+// saturate the bus during scrolling and produce visible tearing/blinking.
+//
+// Keep a previous-PRESENTED image in PSRAM. Each frame, compare entire RGB565
+// rows; transmit only contiguous bands that changed. A band uses full-width
+// rows, so each transfer is contiguous in the existing framebuffer -- no
+// copied scratch buffer or unsupported clipped-rectangle APIs needed.
+// The QSPI writePixels path is polling/synchronous; once draw16bitRGBBitmap
+// returns it is safe to update the snapshot. Static frames generate NO writes.
+// If PSRAM is low, fall back to Arduino_Canvas::flush() automatically.
+#ifdef ARDUINO_ARCH_ESP32
+#include <esp_heap_caps.h>
+class TamaSmoothCanvas : public Arduino_Canvas {
+ public:
+  TamaSmoothCanvas(int16_t w, int16_t h, Arduino_G *output)
+      : Arduino_Canvas(w, h, output) {}
+
+  ~TamaSmoothCanvas() {
+    if (_lastShown) heap_caps_free(_lastShown);
+  }
+
+  void flush(bool force_flush = false) override {
+    if (!_framebuffer || !_output) return;
+    constexpr int kW = LCD_WIDTH;
+    constexpr int kH = LCD_HEIGHT;
+    constexpr size_t kBytes = (size_t)kW * kH * sizeof(uint16_t);
+
+    // The display and canvas are constructed with rotation 0. If that ever
+    // changes, use the library's own flush (it handles rotations itself).
+    if (_rotation != 0) {
+      Arduino_Canvas::flush(force_flush);
+      _valid = false;
+      return;
+    }
+    if (!_allocTried) {
+      _allocTried = true;
+      _lastShown = (uint16_t *)heap_caps_malloc(
+          kBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      if (!_lastShown) Serial.println("ui: partial flush unavailable; using full frames");
+    }
+    if (!_lastShown) { Arduino_Canvas::flush(force_flush); return; }
+
+    if (force_flush || !_valid) {
+      Arduino_Canvas::flush(force_flush);
+      memcpy(_lastShown, _framebuffer, kBytes);
+      _valid = true;
+      return;
+    }
+
+    // Fold short unchanged gaps into neighboring bands to avoid many small
+    // QSPI transactions. Too many or too-large bands are sent as one full
+    // frame instead. No changes = no panel transfer at all.
+    struct Band { int16_t top, end; } bands[8];
+    int count = 0;
+    int lastChange = -100;
+    for (int y = 0; y < kH; ++y) {
+      const size_t off = (size_t)y * kW;
+      if (memcmp(_framebuffer + off, _lastShown + off,
+                 kW * sizeof(uint16_t)) == 0) continue;
+      if (count == 0 || y - lastChange > 4) {
+        if (count == 8) { flushFull(); return; }
+        bands[count].top = (int16_t)y;
+        bands[count].end = (int16_t)(y + 1);
+        ++count;
+      } else {
+        bands[count - 1].end = (int16_t)(y + 1);
+      }
+      lastChange = y;
+    }
+    if (!count) return;
+
+    int changedRows = 0;
+    for (int i = 0; i < count; ++i)
+      changedRows += bands[i].end - bands[i].top;
+    if (changedRows >= (kH * 3) / 4) { flushFull(); return; }
+
+    for (int i = 0; i < count; ++i) {
+      const int y = bands[i].top;
+      const int h = bands[i].end - y;
+      const size_t off = (size_t)y * kW;
+      _output->draw16bitRGBBitmap(_output_x, _output_y + y,
+                                  _framebuffer + off, kW, h);
+      memcpy(_lastShown + off, _framebuffer + off,
+             (size_t)h * kW * sizeof(uint16_t));
+    }
+  }
+
+ private:
+  uint16_t *_lastShown = nullptr;
+  bool _allocTried = false;
+  bool _valid = false;
+
+  void flushFull() {
+    Arduino_Canvas::flush();
+    memcpy(_lastShown, _framebuffer,
+           (size_t)LCD_WIDTH * LCD_HEIGHT * sizeof(uint16_t));
+    _valid = true;
+  }
+};
+TamaSmoothCanvas *gfx = new TamaSmoothCanvas(LCD_WIDTH, LCD_HEIGHT, panel);
+#else
+// Emulator keeps its existing drawing and flush behavior.
 Arduino_Canvas *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel);
+#endif
 
 TouchDrvCST92xx touch;
 Pet pet;
@@ -117,27 +222,23 @@ uint8_t nameLen = 0;
 #define CARD_PAGES 4   // profile, stats, moves, progress -- medals moved to
                        // the player card, where the totals already live
 uint8_t cardPage = 0;         // 0 perfil, 1 stats+medallas
-// Menu overlay: opened by tapping the pet's name on the main screen. The
-// horizontal swipe is already taken by the Pokedex (it pages through 10 pages
-// internally), so a hub on that axis would be ambiguous; the header was inert
-// and is the only free surface left.
+// Main menu overlay, opened from the name/status band on the home screen.
+// The eight actions remain in their original order, but are now finger-sized
+// and scroll in a bounded viewport inside the existing round-safe GBA panel.
+// MENU_ROW_Y is shared between the painter, touch handler and test helper.
 bool menuOpen = false;
+int16_t menuScroll = 0;
 #define MENU_X 73
-// Four rows: PARTY and GYMS came out, since a swipe right and a swipe left now
-// reach them directly. Sized to the bezel -- the panel is 320 wide, so 160 from
-// the centre, and sqrt(233^2 - 160^2) = 169 means it can only span y 64..402.
 #define MENU_Y 70
 #define MENU_W 320
 #define MENU_H 326
-#define MENU_ROW_H 34
-#define MENU_ROW_GAP 5
-// 7 rows: STATS / BAG / POKEDEX / HABITAT / SETTINGS / RETIRE / CLOSE. The row height came
-// down from 52 to fit the sixth: the panel spans 70..396, and the round display
-// gives a half-width of 166 there against the 160 a row needs, so the corners
-// stay on glass. Anything taller does not -- at 6 rows of 52 it would reach 413
-// and the bottom corners would fall off the bezel.
 #define MENU_ROWS 8
-#define MENU_ROW_Y(i) (MENU_Y + 12 + (i) * (MENU_ROW_H + MENU_ROW_GAP))
+#define MENU_LIST_TOP 104
+#define MENU_LIST_BOTTOM 368
+#define MENU_ROW_H 70
+#define MENU_ROW_GAP 10
+#define MENU_ROW_STEP (MENU_ROW_H + MENU_ROW_GAP)
+#define MENU_ROW_Y(i) (MENU_LIST_TOP + (i) * MENU_ROW_STEP - menuScroll)
 
 // Party screen. partyPick != 0 means the newcomer needs a slot: the player
 // either taps someone to replace or lets it go.
@@ -1233,10 +1334,15 @@ void loop() {
     nvsReport("health");
   }
 
-  // 85 ms en juego/saco: margen seguro para que el redibujado no pise el envio
-  // DMA del frame anterior (a 40-65 ms solapaba y causaba flashes negros; con
-  // sprites grandes el dibujo tarda mas, asi que se deja colchon)
-  if (now - lastRender >= (uint32_t)((gameOpen || sackOpen || spdOpen) ? 85 : 100)) {
+  // Menu/list interaction: redraw more responsively while changing-area
+  // flush avoids sending identical frames. Keep the original conservative
+  // timing for gameplay and pet animations.
+  const uint32_t frameInterval =
+      (menuOpen || settingsOpen || wifiOpen || galleryOpen || gymOpen ||
+       bagOpen || partyOpen || martOpen || playerOpen || expeditionOpen ||
+       habitatEditOpen) ? 55u :
+      ((gameOpen || sackOpen || spdOpen) ? 85u : 100u);
+  if (now - lastRender >= frameInterval) {
     lastRender = now;
     render();
   }
@@ -1606,6 +1712,7 @@ static int16_t *uiListScrollPtr() {
     case SCR_GALLERY: return galleryDetail ? nullptr : &galleryScroll;
     case SCR_BAGSCR: return &bagScroll;
     case SCR_MOVEPICK: return &moveScroll;
+    case SCR_MENU: return &menuScroll;
     case SCR_SETTINGS: return resetView == RESET_NONE ? &settingsScroll : nullptr;
     case SCR_WIFI:
       if (wifiView == WIFI_HOME) return &wifiHomeScroll;
@@ -1634,6 +1741,8 @@ static bool uiListGeometry(int *y0, int *y1, int *stride, int *count) {
       uint8_t moves[64];n=learnableList(moves,sizeof(moves));
       top=76;bot=366;step=58;break;
     }
+    case SCR_MENU:
+      top=MENU_LIST_TOP;bot=MENU_LIST_BOTTOM;step=MENU_ROW_STEP;n=MENU_ROWS;break;
     case SCR_SETTINGS:
       if (resetView != RESET_NONE) return false;
       top=104;bot=373;step=86;n=4;break;
@@ -1658,6 +1767,7 @@ static int uiListMax() {
        uiCurrentScreen()==SCR_GYM?GYM_ROW_H:
        (uiCurrentScreen()==SCR_GYMPICK||uiCurrentScreen()==SCR_DEXPICK)?62:
        uiCurrentScreen()==SCR_GALLERY?80:
+       uiCurrentScreen()==SCR_MENU?MENU_ROW_H:
        uiCurrentScreen()==SCR_SETTINGS?74:
        (uiCurrentScreen()==SCR_WIFI && wifiView==WIFI_HOME)?68:
        uiCurrentScreen()==SCR_WIFI?48:50;
@@ -1696,8 +1806,10 @@ static void uiListDrawBar(int top,int bottom,int count,int stride,int scroll) {
   if(thumb>track)thumb=track;
   const int maxScroll=uiListMax();
   const int sy=top+4+(maxScroll?((track-thumb)*scroll/maxScroll):0);
-  gfx->fillRoundRect(398,top+4,5,track,2,GBA_DISABLED);
-  gfx->fillRoundRect(397,sy,7,thumb,3,GBA_BLUE);
+  // The menu bar belongs *inside* its narrower framed panel.
+  const int barX = uiCurrentScreen()==SCR_MENU ? (MENU_X+MENU_W-12) : 398;
+  gfx->fillRoundRect(barX,top+4,5,track,2,GBA_DISABLED);
+  gfx->fillRoundRect(barX-1,sy,7,thumb,3,GBA_BLUE);
 }
 static bool uiListDragging=false,uiListMoved=false;
 static int uiListStartScroll=0;
@@ -1797,6 +1909,12 @@ void handleTouch() {
     int dx = tXl - tX0, dy = tYl - tY0;
     uint32_t dt = millis() - tStart;
     if (rimMoved || uiListMoved) {
+      // Snap the menu to rows when the finger lifts: no half-clipped buttons,
+      // and every release exposes three full-sized, tappable options.
+      if (uiListMoved && uiCurrentScreen()==SCR_MENU) {
+        int snap=((int(menuScroll)+MENU_ROW_STEP/2)/MENU_ROW_STEP)*MENU_ROW_STEP;
+        menuScroll=(int16_t)uiListClamp(snap);
+      }
       rimActive = false; uiListDragging = false;
       wasPressed = pressed; return;
     }  // never turn a dragged item into a tap
@@ -2495,18 +2613,15 @@ void onTap(int16_t x, int16_t y) {
     }
     return;
   }
-  // The menu is modal and has three independent ways out: the CLOSE row, a tap
-  // anywhere on the dimmed area outside the panel, and any swipe (see onSwipe).
-  // Deliberately no timeout: a menu that vanishes while you read it is worse
-  // than one that lingers.
+  // Modal menu: vertical drags inside the list scroll it. Tap only a fully
+  // visible row; a tap outside the panel (or horizontal/back swipe) closes it.
   if (menuOpen) {
     bool inPanel = (x >= MENU_X && x <= MENU_X + MENU_W &&
                     y >= MENU_Y && y <= MENU_Y + MENU_H);
-    if (!inPanel) { menuOpen = false; return; }   // tap outside = back to the pet
-    for (int i = 0; i < MENU_ROWS; i++) {
-      int ry = MENU_ROW_Y(i);
-      if (x < MENU_X + 18 || x > MENU_X + MENU_W - 18) continue;
-      if (y < ry || y > ry + MENU_ROW_H) continue;
+    if (!inPanel) { menuOpen = false; return; }
+    int i = uiListIndexAt(y, MENU_LIST_TOP, MENU_LIST_BOTTOM,
+                          MENU_ROW_STEP, MENU_ROW_H, menuScroll, MENU_ROWS);
+    if (i >= 0 && x >= MENU_X + 18 && x <= MENU_X + MENU_W - 18) {
       sfxPlay(SFX_TAP);
       menuOpen = false;
       if (i == 0) { cardOpen = true; cardPage = 1; }   // straight to the stats page
@@ -2689,6 +2804,7 @@ void onTap(int16_t x, int16_t y) {
   // tapping the name/status band opens the menu. This band was inert before,
   // and it sits clear of inPetZone (which starts at y 95).
   if (y >= 28 && y < 94) {
+    menuScroll = 0;
     menuOpen = true;
     sfxPlay(SFX_TAP);
     return;
@@ -7100,15 +7216,23 @@ static void menuRowLabel(int i, char *out, size_t n) {
 // same tap started opening the BAG. A test that keeps its own copy of a layout
 // proves the transcription; see CLAUDE.md on rpickPageCount() and
 // uiButtonHeights(), which exist for exactly this.
-int uiMenuRowCenterY(int i) { return MENU_ROW_Y(i) + MENU_ROW_H / 2; }
+int uiMenuRowCenterY(int i) {
+  if (i < 0 || i >= MENU_ROWS) return -1;
+  const int y=MENU_ROW_Y(i);
+  return y>=MENU_LIST_TOP && y+MENU_ROW_H<=MENU_LIST_BOTTOM
+         ? y+MENU_ROW_H/2 : -1; // hidden rows cannot be tapped
+}
 
 void drawMenu() {
-  // Keep MENU_ROW_Y and its hit boxes intact: only the paint changes.
-  // GBA pause menus are opaque; avoid ghost text from the home HUD beneath.
+  // GBA pause menus stay opaque so no HUD text bleeds into the scroll list.
   gbaBackdrop(gfx, GBA_WATER, GBA_MIST);
   gbaFrame(gfx, MENU_X, MENU_Y, MENU_W, MENU_H, GBA_PAPER, GBA_TEAL);
-  // The label is above row 0, not inside a touch target.
   gbaRibbon(gfx, "MAIN MENU", 128, 38, 210, 36, GBA_BLUE, 2);
+  gfx->setTextSize(1);
+  gfx->setTextColor(GBA_TEAL);
+  gfx->setCursor(CX-45, 85);
+  gfx->print("SWIPE TO SCROLL");
+  menuScroll=(int16_t)uiListClamp(menuScroll);
 
   const uint16_t accents[MENU_ROWS] = {
     GBA_BLUE, GBA_YELLOW, GBA_TEAL, GBA_GREEN,
@@ -7120,32 +7244,42 @@ void drawMenu() {
   };
   for (int i = 0; i < MENU_ROWS; i++) {
     const int y = MENU_ROW_Y(i);
+    if (y < MENU_LIST_TOP || y + MENU_ROW_H > MENU_LIST_BOTTOM) continue;
     const int x = MENU_X + 18, w = MENU_W - 36;
     const bool close = (i == MENU_ROWS - 1);
     const bool disabled = (i == 6 && (expeditions.active() || !pet.canRetireNow())) ||
                           (i == 3 && (pet.isEgg() || pet.ceremony));
     const uint16_t edge = disabled ? GBA_DISABLED : accents[i];
-    // Thin GBA double-outline; original hit rectangle remains x..x+w, y..y+34.
-    gfx->fillRoundRect(x, y, w, MENU_ROW_H, 5, GBA_NAVY);
-    gfx->fillRoundRect(x + 2, y + 2, w - 4, MENU_ROW_H - 4, 4,
+    // Retain GBA double-outline, colored stripe, and an arrow for actions.
+    gfx->fillRoundRect(x, y, w, MENU_ROW_H, 7, GBA_NAVY);
+    gfx->fillRoundRect(x + 3, y + 3, w - 6, MENU_ROW_H - 6, 5,
                        disabled ? GBA_DISABLED : fills[i]);
-    gfx->fillRect(x + 5, y + 4, 9, MENU_ROW_H - 8, edge);
-    gfx->drawFastHLine(x + 17, y + 3, w - 24, GBA_WHITE);
-    // A pixel-step arrow at the right, distinct from the larger touch area.
+    gfx->fillRect(x + 7, y + 7, 10, MENU_ROW_H - 14, edge);
+    gfx->drawFastHLine(x + 20, y + 4, w - 32, GBA_WHITE);
     if (!close && !disabled) {
-      gfx->fillTriangle(x + w - 20, y + 11, x + w - 12, y + 17,
-                        x + w - 20, y + 23, GBA_NAVY);
+      const int arrowY = y + MENU_ROW_H / 2;
+      gfx->fillTriangle(x + w - 24, arrowY - 8,
+                        x + w - 13, arrowY,
+                        x + w - 24, arrowY + 8, GBA_NAVY);
     }
     char lbl[28];
     menuRowLabel(i, lbl, sizeof(lbl));
-    // Pokedex counters and translations must fit; auto-scale rather than clip.
-    const int size = (strlen(lbl) > 20) ? 1 : 2;
+    // Most options use 3x pixel text; long translated or counted labels fit
+    // at 2x/1x without colliding with the arrow on the right.
+    const int len=(int)strlen(lbl);
+    const int size=len<=10?3:(len<=17?2:1);
     gfx->setTextSize(size);
     gfx->setTextColor(disabled ? gbaRgb(96, 106, 105) : GBA_NAVY);
-    gfx->setCursor(CX - (int)strlen(lbl) * 3 * size,
-                   y + (MENU_ROW_H - 8 * size) / 2);
+    gfx->setCursor(CX-len*3*size,
+                   y+(MENU_ROW_H-8*size)/2);
     gfx->print(lbl);
   }
+  uiListDrawBar(MENU_LIST_TOP,MENU_LIST_BOTTOM,MENU_ROWS,MENU_ROW_STEP,menuScroll);
+  gfx->drawFastHLine(MENU_X+18, 375, MENU_W-36, GBA_DISABLED);
+  gfx->setTextSize(1);
+  gfx->setTextColor(GBA_TEAL);
+  gfx->setCursor(CX-60, 381);
+  gfx->print("TAP OUTSIDE TO CLOSE");
 }
 
 
