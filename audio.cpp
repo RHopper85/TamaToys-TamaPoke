@@ -126,7 +126,7 @@ static const TuneDef MUSIC[] = {
   { M_VICTORY, 5, false },
 };
 static volatile uint8_t gMusic = MUS_NONE;
-static volatile uint8_t gVol = 7;
+static volatile uint8_t gVol = 1;
 
 static int16_t buf[256 * 2];  // estéreo intercalado (L=R)
 static int16_t mono[256];
