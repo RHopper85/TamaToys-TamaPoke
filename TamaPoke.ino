@@ -624,6 +624,8 @@ uint8_t martPage = 0;
 int16_t martScroll = 0, gymScroll = 0, regionScroll = 0;
 int16_t galleryScroll = 0, bagScroll = 0, habitatScroll = 0;
 int16_t moveScroll = 0, wifiScroll = 0;
+// Independent scroll offsets for the Settings menu and Wi-Fi home menu.
+int16_t settingsScroll = 0, wifiHomeScroll = 0;
 bool habitatEditOpen = false;
 bool expeditionOpen = false;
 bool expeditionConfirm = false;
@@ -1056,7 +1058,8 @@ void setup() {
 #endif
   batBegin();
   pwrSetup();
-  if (!pedoBegin()) Serial.println("pedometer: no QMI8658 -- the Mart earns nothing this session");
+  //temp disable for debugging due to SensorLib Crash
+  //if (!pedoBegin()) Serial.println("pedometer: no QMI8658 -- the Mart earns nothing this session");
   uint32_t e = rtcEpoch();
   if (e == 0) {
     rtcSetEpoch(1767225600UL);  // RTC virgen: semilla (la hora absoluta da igual,
@@ -1603,7 +1606,9 @@ static int16_t *uiListScrollPtr() {
     case SCR_GALLERY: return galleryDetail ? nullptr : &galleryScroll;
     case SCR_BAGSCR: return &bagScroll;
     case SCR_MOVEPICK: return &moveScroll;
+    case SCR_SETTINGS: return resetView == RESET_NONE ? &settingsScroll : nullptr;
     case SCR_WIFI:
+      if (wifiView == WIFI_HOME) return &wifiHomeScroll;
       if(wifiView==WIFI_NEARBY||wifiView==WIFI_SAVED)return &wifiScroll;
       return nullptr;
     default: return nullptr;
@@ -1629,7 +1634,13 @@ static bool uiListGeometry(int *y0, int *y1, int *stride, int *count) {
       uint8_t moves[64];n=learnableList(moves,sizeof(moves));
       top=76;bot=366;step=58;break;
     }
+    case SCR_SETTINGS:
+      if (resetView != RESET_NONE) return false;
+      top=104;bot=373;step=86;n=4;break;
     case SCR_WIFI:
+      if (wifiView == WIFI_HOME) {
+        top=140;bot=375;step=80;n=4;break;
+      }
       if(wifiView!=WIFI_NEARBY&&wifiView!=WIFI_SAVED)return false;
       top=119;bot=370;step=62;
       n=wifiView==WIFI_NEARBY?TamaWifi::networkCount():TamaWifi::savedCount();break;
@@ -1647,6 +1658,8 @@ static int uiListMax() {
        uiCurrentScreen()==SCR_GYM?GYM_ROW_H:
        (uiCurrentScreen()==SCR_GYMPICK||uiCurrentScreen()==SCR_DEXPICK)?62:
        uiCurrentScreen()==SCR_GALLERY?80:
+       uiCurrentScreen()==SCR_SETTINGS?74:
+       (uiCurrentScreen()==SCR_WIFI && wifiView==WIFI_HOME)?68:
        uiCurrentScreen()==SCR_WIFI?48:50;
   const int total=n?(n-1)*step+rowHeight:0;
   int maxScroll=total-(y1-y0);
@@ -2518,7 +2531,7 @@ void onTap(int16_t x, int16_t y) {
         } else sfxPlay(SFX_DENY);
       }
       else if (i == 4) { expeditionOpen = true; expeditionConfirm = false; expeditionJournal = false; expeditionPick = 0; }
-      else if (i == 5) { settingsOpen = true; }
+      else if (i == 5) { settingsOpen = true; settingsScroll = 0; }
       else if (i == 6) {
         if (expeditions.active() || !pet.canRetireNow()) { sfxPlay(SFX_DENY); return; }
         choiceKind = 3; choiceUntil = millis() + 12000;
@@ -6657,7 +6670,6 @@ void renderCard() {
 // Source art is in assets/decor/source; runtime RGB565 is in habitat_sprites.h.
 // The home screen keeps its controls. No placeholders are drawn for items
 // awaiting art, rather than misleading players with colored squares.
-struct HabitatPoint { int16_t x, y; };
 // Explicit, safe art anchors. The slot is for persistence, NOT a screen coordinate.
 // Assigning anchors by item category avoids the previous arbitrary slot scatter.
 static HabitatPoint habitatAnchor(uint8_t id, uint8_t ordinal) {

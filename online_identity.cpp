@@ -100,11 +100,11 @@ static int request(const char *method, const char *route,
 static bool freshToken() {
   uint8_t random[32];
   esp_fill_random(random, sizeof(random));
-  static const char HEX[] = "0123456789abcdef";
+  static const char kHexDigits[] = "0123456789abcdef";
   char fresh[65];
   for (int i = 0; i < 32; ++i) {
-    fresh[i * 2] = HEX[random[i] >> 4];
-    fresh[i * 2 + 1] = HEX[random[i] & 15];
+    fresh[i * 2] = kHexDigits[random[i] >> 4];
+    fresh[i * 2 + 1] = kHexDigits[random[i] & 15];
   }
   fresh[64] = 0;
   // Persist BEFORE POST. Retries send this same secret so a dropped response

@@ -46,7 +46,8 @@ static void wifiFrame(const char *title) {
 }
 
 static void wifiBackButton() {
-  wifiButton(132, 397, 202, 34, "BACK");
+  // Finger-sized on the 466x466 display, consistent across Wi-Fi screens.
+  wifiButton(132, 389, 202, 46, "BACK");
 }
 
 static void wifiNotice(const char *msg) {
@@ -113,16 +114,28 @@ static void renderResetConfirm() {
   gfx->flush();
 }
 
+// Shared coordinates are used by both drawing and hit-testing below.
+#define SETTINGS_ROW_TOP 104
+#define SETTINGS_ROW_BOTTOM 373
+#define SETTINGS_ROW_STEP 86
+#define SETTINGS_ROW_H 74
+#define SETTINGS_ROW_COUNT 4
 void renderSettingsHub() {
   if (resetView != RESET_NONE) { renderResetConfirm(); return; }
   wifiFrame("SETTINGS");
-  wifiLabel("DEVICE OPTIONS", 84, 1, GBA_TEAL);
-  wifiButton(99, 105, 268, 43, "TIME / SOUND");
-  wifiButton(99, 154, 268, 43, "WI-FI");
-  wifiLabel("SAVE MANAGEMENT", 202, 1, GBA_PURPLE);
-  wifiButton(99, 220, 268, 43, "NEW GAME");
-  wifiButton(99, 277, 268, 43, "FACTORY RESET");
-  wifiButton(132, 382, 202, 34, "BACK");
+  wifiLabel("SWIPE TO SCROLL", 85, 1, GBA_TEAL);
+  static const char *const labels[SETTINGS_ROW_COUNT] = {
+    "TIME / SOUND", "WI-FI", "NEW GAME", "FACTORY RESET"
+  };
+  settingsScroll = (int16_t)uiListClamp(settingsScroll);
+  for (int i = 0; i < SETTINGS_ROW_COUNT; ++i) {
+    const int y = SETTINGS_ROW_TOP + i * SETTINGS_ROW_STEP - settingsScroll;
+    if (y < SETTINGS_ROW_TOP || y + SETTINGS_ROW_H > SETTINGS_ROW_BOTTOM) continue;
+    wifiButton(99, y, 268, SETTINGS_ROW_H, labels[i]);
+  }
+  uiListDrawBar(SETTINGS_ROW_TOP, SETTINGS_ROW_BOTTOM,
+                SETTINGS_ROW_COUNT, SETTINGS_ROW_STEP, settingsScroll);
+  wifiButton(132, 389, 202, 46, "BACK");
   gfx->flush();
 }
 
@@ -161,24 +174,28 @@ void settingsHubTap(int16_t x, int16_t y) {
     }
     return;
   }
-  if (wifiHit(x, y, 99, 105, 268, 43)) {
-    openClock();
-    sfxPlay(SFX_TAP);
-  } else if (wifiHit(x, y, 99, 154, 268, 43)) {
-    wifiOpen = true;
-    wifiView = WIFI_HOME;
-    wifiPage = 0;
-    sfxPlay(SFX_TAP);
-  } else if (wifiHit(x, y, 99, 220, 268, 43)) {
-    resetView = RESET_NEW_GAME;
-    sfxPlay(SFX_TAP);
-  } else if (wifiHit(x, y, 99, 277, 268, 43)) {
-    resetView = RESET_FACTORY;
-    sfxPlay(SFX_TAP);
-  } else if (wifiHit(x, y, 132, 382, 202, 34)) {
+  if (wifiHit(x, y, 132, 389, 202, 46)) {
     settingsOpen = false;
     sfxPlay(SFX_TAP);
+    return;
   }
+  const int choice = uiListIndexAt(y, SETTINGS_ROW_TOP, SETTINGS_ROW_BOTTOM,
+                                   SETTINGS_ROW_STEP, SETTINGS_ROW_H,
+                                   settingsScroll, SETTINGS_ROW_COUNT);
+  if (choice < 0 || !wifiHit(x, y, 99, SETTINGS_ROW_TOP, 268,
+                              SETTINGS_ROW_BOTTOM - SETTINGS_ROW_TOP)) return;
+  switch (choice) {
+    case 0: openClock(); break;
+    case 1:
+      wifiOpen = true;
+      wifiView = WIFI_HOME;
+      wifiPage = 0;
+      wifiHomeScroll = 0;
+      break;
+    case 2: resetView = RESET_NEW_GAME; break;
+    case 3: resetView = RESET_FACTORY; break;
+  }
+  sfxPlay(SFX_TAP);
 }
 
 uint8_t wifiPages() {
@@ -216,6 +233,10 @@ static const char *wifiStatusText() {
   }
 }
 
+#define WIFI_HOME_ROW_TOP 140
+#define WIFI_HOME_ROW_BOTTOM 375
+#define WIFI_HOME_ROW_STEP 80
+#define WIFI_HOME_ROW_H 68
 static void renderWifiHome() {
   wifiFrame("WI-FI SETTINGS");
   gbaFrame(gfx, 87, 82, 292, 48, GBA_CREAM,
@@ -227,20 +248,26 @@ static void renderWifiHome() {
     snprintf(name, sizeof(name), "%.20s", TamaWifi::connectedName());
     wifiLabel(name, 114, 1, GBA_TEAL);
   }
-  wifiButton(89, 137, 288, 49,
-             TamaWifi::enabled() ? "WI-FI: ON" : "WI-FI: OFF",
-             TamaWifi::enabled());
-  wifiButton(89, 198, 288, 49,
-             TamaWifi::autoConnect() ? "AUTO: ON" : "AUTO: OFF",
-             TamaWifi::autoConnect());
-  wifiButton(89, 259, 288, 49, "AVAILABLE NETWORKS",
-             false, TamaWifi::enabled(), 2);
   char saved[25];
   snprintf(saved, sizeof(saved), "SAVED NETWORKS (%d)", TamaWifi::savedCount());
-  wifiButton(89, 320, 288, 49, saved);
+  const char *const labels[4] = {
+    TamaWifi::enabled() ? "WI-FI: ON" : "WI-FI: OFF",
+    TamaWifi::autoConnect() ? "AUTO: ON" : "AUTO: OFF",
+    "AVAILABLE NETWORKS", saved
+  };
+  wifiHomeScroll = (int16_t)uiListClamp(wifiHomeScroll);
+  for (int i = 0; i < 4; ++i) {
+    const int y = WIFI_HOME_ROW_TOP + i * WIFI_HOME_ROW_STEP - wifiHomeScroll;
+    if (y < WIFI_HOME_ROW_TOP || y + WIFI_HOME_ROW_H > WIFI_HOME_ROW_BOTTOM) continue;
+    wifiButton(89, y, 288, WIFI_HOME_ROW_H, labels[i],
+               i == 0 ? TamaWifi::enabled() : i == 1 ? TamaWifi::autoConnect() : false,
+               i != 2 || TamaWifi::enabled());
+  }
+  uiListDrawBar(WIFI_HOME_ROW_TOP, WIFI_HOME_ROW_BOTTOM, 4,
+                WIFI_HOME_ROW_STEP, wifiHomeScroll);
   wifiBackButton();
 #ifndef ARDUINO_ARCH_ESP32
-  wifiLabel("EMULATOR: SAMPLE WI-FI", 441, 1, UI_INK_SOFT);
+  wifiLabel("EMULATOR: SAMPLE WI-FI", 443, 1, UI_INK_SOFT);
 #endif
 }
 
@@ -328,10 +355,16 @@ static const char *const WIFI_KEYS[] = {
   "~\\|/'\"<>?;:,.@#%^&*()-_+=[]{}!"
 };
 static const char *const WIFI_MODES[] = { "abc", "ABC", "123", "#+=" };
-#define WIFI_KEY_X 53
-#define WIFI_KEY_Y 157
-#define WIFI_KEY_STEP_X 45
-#define WIFI_KEY_STEP_Y 47
+// Seven columns make keys ~30% wider than the previous eight-column board.
+// Five rows still cover all 32 punctuation keys without changing their order.
+#define WIFI_KEY_X 51
+#define WIFI_KEY_Y 151
+#define WIFI_KEY_COLS 7
+#define WIFI_KEY_ROWS 5
+#define WIFI_KEY_STEP_X 52
+#define WIFI_KEY_STEP_Y 43
+#define WIFI_KEY_W 48
+#define WIFI_KEY_H 40
 
 static void renderWifiPassword() {
   wifiFrame("PASSWORD");
@@ -354,30 +387,29 @@ static void renderWifiPassword() {
   snprintf(length, sizeof(length), "%u / 64 chars", wifiPassLen);
   wifiLabel(length, 143, 1, UI_INK_SOFT);
   const char *keys = WIFI_KEYS[wifiKeyPage % 4];
-  size_t keyCount = strlen(keys);
-  for (int i = 0; i < 32; ++i) {
-    if ((size_t)i >= keyCount) break;
-    int x = WIFI_KEY_X + (i % 8) * WIFI_KEY_STEP_X;
-    int y = WIFI_KEY_Y + (i / 8) * WIFI_KEY_STEP_Y;
-    gfx->fillRoundRect(x, y + 2, 41, 40, 5, GBA_NAVY);
-    gfx->fillRoundRect(x + 2, y, 37, 39, 4, GBA_CREAM);
-    gfx->drawRoundRect(x + 2, y, 37, 39, 4, GBA_TEAL);
+  const size_t keyCount = strlen(keys);
+  for (size_t i = 0; i < keyCount; ++i) {
+    const int x = WIFI_KEY_X + (int)(i % WIFI_KEY_COLS) * WIFI_KEY_STEP_X;
+    const int y = WIFI_KEY_Y + (int)(i / WIFI_KEY_COLS) * WIFI_KEY_STEP_Y;
+    gfx->fillRoundRect(x, y + 2, WIFI_KEY_W, WIFI_KEY_H, 5, GBA_NAVY);
+    gfx->fillRoundRect(x + 2, y, WIFI_KEY_W - 4, WIFI_KEY_H - 2, 4, GBA_CREAM);
+    gfx->drawRoundRect(x + 2, y, WIFI_KEY_W - 4, WIFI_KEY_H - 2, 4, GBA_TEAL);
     gfx->setTextColor(GBA_NAVY);
     gfx->setTextSize(2);
-    gfx->setCursor(x + 14, y + 13);
+    gfx->setCursor(x + (WIFI_KEY_W - 12) / 2, y + 12);
     char k[] = { keys[i], 0 };
     gfx->print(k);
   }
   for (int i = 0; i < 4; ++i)
-    wifiButton(78 + i * 79, 353, 73, 34, WIFI_MODES[i],
+    wifiButton(78 + i * 79, 372, 73, 34, WIFI_MODES[i],
                wifiKeyPage == i, true, 1);
-  wifiButton(111, 397, 75, 31, "SPACE", false, true, 1);
-  wifiButton(196, 397, 75, 31, "DEL", false, true, 1);
-  wifiButton(281, 397, 75, 31, "JOIN", true, true, 1);
+  wifiButton(134, 410, 64, 34, "SPACE", false, true, 1);
+  wifiButton(202, 410, 64, 34, "DEL", false, true, 1);
+  wifiButton(270, 410, 64, 34, "JOIN", true, true, 1);
   if (wifiMessageUntil > millis())
-    wifiLabel(wifiMessage, 438, 1, GBA_RED);
+    wifiLabel(wifiMessage, 448, 1, GBA_RED);
   else
-    wifiLabel("Swipe down to cancel", 438, 1, UI_INK_SOFT);
+    wifiLabel("Swipe down to cancel", 448, 1, UI_INK_SOFT);
 }
 
 static void wifiSelectNetwork(const TamaWifi::Network &network) {
@@ -410,32 +442,36 @@ static void wifiPasswordTap(int16_t x, int16_t y) {
     wifiShowPassword = !wifiShowPassword;
     return;
   }
-  if (y >= WIFI_KEY_Y && y < WIFI_KEY_Y + 4 * WIFI_KEY_STEP_Y &&
-      x >= WIFI_KEY_X && x < WIFI_KEY_X + 8 * WIFI_KEY_STEP_X) {
-    int col = (x - WIFI_KEY_X) / WIFI_KEY_STEP_X;
-    int row = (y - WIFI_KEY_Y) / WIFI_KEY_STEP_Y;
-    int i = row * 8 + col;
+  if (y >= WIFI_KEY_Y && y < WIFI_KEY_Y + WIFI_KEY_ROWS * WIFI_KEY_STEP_Y &&
+      x >= WIFI_KEY_X && x < WIFI_KEY_X + WIFI_KEY_COLS * WIFI_KEY_STEP_X) {
+    const int col = (x - WIFI_KEY_X) / WIFI_KEY_STEP_X;
+    const int row = (y - WIFI_KEY_Y) / WIFI_KEY_STEP_Y;
+    const int keyX = WIFI_KEY_X + col * WIFI_KEY_STEP_X;
+    const int keyY = WIFI_KEY_Y + row * WIFI_KEY_STEP_Y;
+    const int i = row * WIFI_KEY_COLS + col;
     const char *keys = WIFI_KEYS[wifiKeyPage % 4];
-    if (i < (int)strlen(keys) && wifiPassLen < sizeof(wifiPassword) - 1) {
+    // Gap between keys is deliberately not clickable.
+    if (x < keyX + WIFI_KEY_W && y < keyY + WIFI_KEY_H &&
+        i < (int)strlen(keys) && wifiPassLen < sizeof(wifiPassword) - 1) {
       wifiPassword[wifiPassLen++] = keys[i];
       wifiPassword[wifiPassLen] = '\0';
     }
     return;
   }
-  if (y >= 353 && y <= 387) {
+  if (y >= 372 && y <= 406) {
     for (int i = 0; i < 4; ++i)
-      if (wifiHit(x, y, 78 + i * 79, 353, 73, 34)) {
+      if (wifiHit(x, y, 78 + i * 79, 372, 73, 34)) {
         wifiKeyPage = i;
         return;
       }
   }
-  if (wifiHit(x, y, 111, 397, 75, 31) &&
+  if (wifiHit(x, y, 134, 410, 64, 34) &&
       wifiPassLen < sizeof(wifiPassword) - 1) {
     wifiPassword[wifiPassLen++] = ' ';
     wifiPassword[wifiPassLen] = '\0';
-  } else if (wifiHit(x, y, 196, 397, 75, 31)) {
+  } else if (wifiHit(x, y, 202, 410, 64, 34)) {
     if (wifiPassLen) wifiPassword[--wifiPassLen] = '\0';
-  } else if (wifiHit(x, y, 281, 397, 75, 31)) {
+  } else if (wifiHit(x, y, 270, 410, 64, 34)) {
     if (wifiPassLen < 8) {
       wifiNotice("Password needs 8+ chars");
       return;
@@ -464,25 +500,30 @@ void renderWifi() {
 
 void wifiTap(int16_t x, int16_t y) {
   if (wifiView == WIFI_PASSWORD) { wifiPasswordTap(x, y); return; }
-  if (wifiHit(x, y, 132, 397, 202, 34)) {
+  if (wifiHit(x, y, 132, 389, 202, 46)) {
     wifiBack();
     sfxPlay(SFX_TAP);
     return;
   }
   if (wifiView == WIFI_HOME) {
-    if (wifiHit(x, y, 89, 137, 288, 49)) {
+    const int choice = uiListIndexAt(y, WIFI_HOME_ROW_TOP, WIFI_HOME_ROW_BOTTOM,
+                                     WIFI_HOME_ROW_STEP, WIFI_HOME_ROW_H,
+                                     wifiHomeScroll, 4);
+    if (choice < 0 || !wifiHit(x, y, 89, WIFI_HOME_ROW_TOP, 288,
+                                WIFI_HOME_ROW_BOTTOM - WIFI_HOME_ROW_TOP)) return;
+    if (choice == 0) {
       TamaWifi::setEnabled(!TamaWifi::enabled());
       sfxPlay(SFX_TAP);
-    } else if (wifiHit(x, y, 89, 198, 288, 49)) {
+    } else if (choice == 1) {
       TamaWifi::setAutoConnect(!TamaWifi::autoConnect());
       sfxPlay(SFX_TAP);
-    } else if (wifiHit(x, y, 89, 259, 288, 49)) {
+    } else if (choice == 2) {
       if (!TamaWifi::enabled()) { sfxPlay(SFX_DENY); return; }
       wifiView = WIFI_NEARBY;
       wifiPage = 0;wifiScroll=0;
       TamaWifi::scan();
       sfxPlay(SFX_TAP);
-    } else if (wifiHit(x, y, 89, 320, 288, 49)) {
+    } else if (choice == 3) {
       wifiView = WIFI_SAVED;
       wifiPage = 0;wifiScroll=0;
       sfxPlay(SFX_TAP);
