@@ -591,10 +591,13 @@ int main(int argc, char **argv) {
           uint32_t r = ((c >> 11) & 31) * 255 / 31;
           uint32_t g = ((c >> 5) & 63) * 255 / 63;
           uint32_t b = (c & 31) * 255 / 31;
-          // dim what falls outside the round panel: those pixels exist in the
-          // framebuffer but are not visible on the real hardware
+          // Make everything outside the circular display solid black.
           int dx = x - 233, dy = y - 233;
-          if (dx * dx + dy * dy > 233 * 233) { r /= 4; g /= 4; b /= 4; }
+          if (dx * dx + dy * dy > 233 * 233) {
+              r = 0;
+              g = 0;
+              b = 0;
+          }
           px[y * PANEL + x] = (r << 16) | (g << 8) | b;
         }
       SDL_UpdateTexture(tex, nullptr, px.data(), PANEL * 4);

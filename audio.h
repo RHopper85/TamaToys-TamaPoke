@@ -21,6 +21,7 @@ enum Sfx : uint8_t {
   SFX_SUPER,    // super effective
   SFX_FAINT,    // something goes down
   SFX_VICTORY,  // the fight is won
+  SFX_VOLUME,   // settings: short confirmation chirp
   SFX_COUNT
 };
 

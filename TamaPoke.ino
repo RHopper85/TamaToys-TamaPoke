@@ -297,6 +297,7 @@ uint8_t wifiView = WIFI_HOME;
 uint8_t wifiPage = 0;
 char wifiSelectedSsid[33] = "";
 char wifiPassword[65] = "";
+uint32_t wifiLastCharAt = 0;  // timestamp of last typed password character
 uint8_t wifiPassLen = 0;
 uint8_t wifiKeyPage = 0;
 bool wifiShowPassword = false;
@@ -1356,8 +1357,11 @@ void updateBrightness(uint32_t now) {
   }
   uint32_t idle = now - lastInteract;
   dimStage = (idle > 300000) ? 2 : (idle > 90000) ? 1 : 0;
-  uint8_t target = pet.sleeping ? 25 : (usbPresent() ? 180 : 145);
-  if (dimStage == 1) target = pet.sleeping ? 10 : 60;
+  // Only the pet's home screen uses sleep-specific brightness. Menus should
+  // be readable without waking the sleeping Pokemon itself.
+  const bool sleepingHome = pet.sleeping && uiCurrentScreen() == SCR_MAIN;
+  uint8_t target = sleepingHome ? 25 : (usbPresent() ? 180 : 145);
+  if (dimStage == 1) target = sleepingHome ? 10 : 60;
   else if (dimStage == 2) target = 8;
   if (screenOff) target = 0;
   static uint8_t current = 255;
@@ -4169,12 +4173,12 @@ void clockTap(int16_t x, int16_t y) {
     }
     if (x >= VOL_MINUS_X && x < VOL_MINUS_X + VOL_BTN_W) {
       if (audioVolume() > 0) audioSetVolume(audioVolume() - 1);
-      sfxPlay(SFX_TAP);                        // so the new level is audible
+      sfxPlay(SFX_VOLUME);                     // preview at the NEW level
       return;
     }
     if (x >= VOL_PLUS_X && x < VOL_PLUS_X + VOL_BTN_W) {
       if (audioVolume() < 10) audioSetVolume(audioVolume() + 1);
-      sfxPlay(SFX_TAP);
+      sfxPlay(SFX_VOLUME);
       return;
     }
     if (x >= LANG_PILL_X && x < LANG_PILL_X + LANG_PILL_W) {  // cicla idioma

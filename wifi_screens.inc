@@ -210,6 +210,8 @@ void wifiBack() {
   if (wifiView == WIFI_PASSWORD) {
     memset(wifiPassword, 0, sizeof(wifiPassword));
     wifiPassLen = 0;
+    wifiLastCharAt = 0;
+    wifiShowPassword = false;
     wifiView = WIFI_NEARBY;
   } else if (wifiView == WIFI_SAVED_DETAIL) {
     wifiView = WIFI_SAVED;
@@ -374,8 +376,11 @@ static void renderWifiPassword() {
   gbaFrame(gfx, 77, 98, 312, 44, GBA_WHITE, GBA_YELLOW);
   char shown[23];
   size_t start = wifiPassLen > 18 ? wifiPassLen - 18 : 0;
+  const bool showLastChar = !wifiShowPassword && wifiPassLen && wifiLastCharAt &&
+                            (uint32_t)(millis() - wifiLastCharAt) < 1000u;
   for (size_t i = start; i < wifiPassLen; ++i)
-    shown[i - start] = wifiShowPassword ? wifiPassword[i] : '*';
+    shown[i - start] = (wifiShowPassword || (showLastChar && i == wifiPassLen - 1))
+                       ? wifiPassword[i] : '*';
   shown[wifiPassLen - start] = '\0';
   gfx->setTextSize(2);
   gfx->setTextColor(GBA_NAVY);
@@ -429,6 +434,7 @@ static void wifiSelectNetwork(const TamaWifi::Network &network) {
     wifiView = WIFI_PASSWORD;
     wifiPassLen = 0;
     wifiPassword[0] = 0;
+    wifiLastCharAt = 0;
     wifiKeyPage = 0;
     wifiShowPassword = false;
     wifiMessageUntil = 0;
@@ -455,6 +461,7 @@ static void wifiPasswordTap(int16_t x, int16_t y) {
         i < (int)strlen(keys) && wifiPassLen < sizeof(wifiPassword) - 1) {
       wifiPassword[wifiPassLen++] = keys[i];
       wifiPassword[wifiPassLen] = '\0';
+      wifiLastCharAt = millis();
     }
     return;
   }
@@ -469,8 +476,10 @@ static void wifiPasswordTap(int16_t x, int16_t y) {
       wifiPassLen < sizeof(wifiPassword) - 1) {
     wifiPassword[wifiPassLen++] = ' ';
     wifiPassword[wifiPassLen] = '\0';
+    wifiLastCharAt = millis();
   } else if (wifiHit(x, y, 202, 410, 64, 34)) {
     if (wifiPassLen) wifiPassword[--wifiPassLen] = '\0';
+    wifiLastCharAt = 0;
   } else if (wifiHit(x, y, 270, 410, 64, 34)) {
     if (wifiPassLen < 8) {
       wifiNotice("Password needs 8+ chars");
@@ -479,6 +488,8 @@ static void wifiPasswordTap(int16_t x, int16_t y) {
     if (TamaWifi::connect(wifiSelectedSsid, wifiPassword)) {
       memset(wifiPassword, 0, sizeof(wifiPassword));
       wifiPassLen = 0;
+      wifiLastCharAt = 0;
+      wifiShowPassword = false;
       wifiView = WIFI_HOME;
       sfxPlay(SFX_TAP);
     } else {

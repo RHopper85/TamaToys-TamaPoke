@@ -63,10 +63,14 @@ bool GbSynth::busy() const {
 
 void GbSynth::render(int16_t *out, size_t n, uint8_t master) {
   if (master > 10) master = 10;
-  // Headroom for three voices at once: each can reach 15, and the sum is
-  // divided so a full chord cannot clip. 1500 per unit of master keeps a single
-  // voice comfortably audible without the mix distorting.
-  const int32_t scale = (int32_t)master * 150;
+  // Perceptual volume curve: lower steps are genuinely quiet rather than
+  // near-full-volume.  At 10, even all three voices at level 15 have headroom
+  // (45 * 680 = 30600), avoiding saturation that obscured volume changes.
+  // Integer lookup keeps the per-sample mixer inexpensive on the ESP32.
+  static const uint16_t volumeGain[11] = {
+    0, 12, 19, 31, 49, 78, 124, 197, 313, 497, 680
+  };
+  const int32_t scale = volumeGain[master];
   for (size_t i = 0; i < n; i++) {
     int32_t mix = 0;
     for (int c = 0; c < GB_VOICES; c++) {

@@ -82,6 +82,7 @@ static bool es8311Init() {
 struct Note { uint16_t f, ms; };
 
 static const Note N_TAP[]    = {{880, 35}};
+static const Note N_VOLUME[] = {{1047, 85}};  // distinguish volume preview from UI taps
 static const Note N_EAT[]    = {{660, 45}, {0, 12}, {660, 45}};
 static const Note N_PLAY[]   = {{784, 45}, {988, 60}};
 static const Note N_HEART[]  = {{1047, 55}, {1319, 90}};
@@ -106,7 +107,7 @@ static const SfxDef SFX[SFX_COUNT] = {
   {N_TAP, 1}, {N_EAT, 3}, {N_PLAY, 2}, {N_HEART, 2}, {N_HATCH, 4},
   {N_EVOLVE, 5}, {N_MEDAL, 5}, {N_DENY, 2}, {N_BYE, 3}, {N_LEVEL, 2},
   {N_HIT, 2}, {N_BEAM, 3}, {N_STATUS, 3}, {N_SUPER, 3}, {N_FAINT, 4},
-  {N_VICTORY, 6},
+  {N_VICTORY, 6}, {N_VOLUME, 1},
 };
 
 // A loop, not a one-shot: the task walks it and starts over.
