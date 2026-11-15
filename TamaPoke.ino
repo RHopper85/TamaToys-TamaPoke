@@ -9,6 +9,8 @@
 //
 // Los sprites y la tabla de especies se generan con tools/sprites.py (emit).
 
+// Upload Test v1.0
+
 #include <Arduino.h>
 #include <Wire.h>
 #include "Arduino_GFX_Library.h"
@@ -120,7 +122,14 @@ class TamaSmoothCanvas : public Arduino_Canvas {
       if (memcmp(_framebuffer + off, _lastShown + off,
                  kW * sizeof(uint16_t)) == 0) continue;
       if (count == 0 || y - lastChange > 4) {
-        if (count == 8) { flushFull(); return; }
+        if (count == 8) {
+          // Avoid switching transport modes during fragmented menu updates.
+          // One continuous band includes every changed row, so the snapshot
+          // and actual display stay synchronized.
+          bands[0].end = kH;
+          count = 1;
+          break;
+        }
         bands[count].top = (int16_t)y;
         bands[count].end = (int16_t)(y + 1);
         ++count;
@@ -134,7 +143,14 @@ class TamaSmoothCanvas : public Arduino_Canvas {
     int changedRows = 0;
     for (int i = 0; i < count; ++i)
       changedRows += bands[i].end - bands[i].top;
-    if (changedRows >= (kH * 3) / 4) { flushFull(); return; }
+    if (changedRows >= (kH * 3) / 4) {
+      // Use the same panel transport as partial updates. The base canvas
+      // full flush may use a different transfer path during touch events.
+      _output->draw16bitRGBBitmap(_output_x, _output_y,
+                                  _framebuffer, kW, kH);
+      memcpy(_lastShown, _framebuffer, kBytes);
+      return;
+    }
 
     for (int i = 0; i < count; ++i) {
       const int y = bands[i].top;
@@ -3500,6 +3516,13 @@ void render() {
     renderCard();
     return;
   }
+  // The main menu is opaque: do not redraw the animated pet scene behind it.
+  // This also prevents background changes from generating unnecessary flushes.
+  if (menuOpen) {
+    drawMenu();
+    gfx->flush();
+    return;
+  }
   int h = sceneHour();
   gNight = pet.sleeping || h < 6 || h >= 20;
   // drawScene cubre los 466x466 completos: sin fillScreen(NEGRO) previo para
@@ -3646,7 +3669,6 @@ void render() {
   }
 
   uiChrome();
-  if (menuOpen) drawMenu();
 
   gfx->flush();
 }

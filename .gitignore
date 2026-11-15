@@ -16,6 +16,7 @@ tools/pmd_cache/
 tools/pokeapi_cache/
 
 reference.txt
+notes.txt
 server/_private/config.php
 
 # The sprite bundles ARE committed, and that is deliberate. They have to be
