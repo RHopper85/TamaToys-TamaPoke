@@ -9,7 +9,7 @@
 //
 // Los sprites y la tabla de especies se generan con tools/sprites.py (emit).
 
-// Patch Test: Main Menu FrozenFrame Isolation
+// Patch Test: Change Driven Menu Render
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -1249,34 +1249,8 @@ void loop() {
   if (runReady && !wasRunReady) sfxPlay(SFX_DENY);
   wasRunReady = runReady;
 
-  // Hardware isolation test: after entering Settings, disable BOTH the
-  // CST9217 interrupt and I2C touch reads for 20 seconds. The display stays
-  // powered and the rest of loop() runs normally. A flash on physical contact
-  // during this interval cannot be caused by our touch ISR or getPoint().
-  // Resume input automatically so the Settings screen is not trapped.
-  static bool diagWasSettings = false;
-  static bool diagTouchIrqDetached = false;
-  static uint32_t diagSettingsEntered = 0;
-  const bool diagSettings = uiCurrentScreen() == SCR_SETTINGS &&
-                            resetView == RESET_NONE;
-  if (diagSettings && !diagWasSettings) {
-    diagSettingsEntered = millis();
-    Serial.println("DIAG: 20-second touch IRQ/I2C isolation started");
-  }
-  diagWasSettings = diagSettings;
-  const bool diagTouchPaused = diagSettings &&
-      (uint32_t)(millis() - diagSettingsEntered) < 20000u;
-  if (diagTouchPaused && !diagTouchIrqDetached) {
-    detachInterrupt(digitalPinToInterrupt(TP_INT));
-    gTouchIrq = false;
-    diagTouchIrqDetached = true;
-  } else if (!diagTouchPaused && diagTouchIrqDetached) {
-    attachInterrupt(digitalPinToInterrupt(TP_INT), touchIsr, FALLING);
-    gTouchIrq = false;
-    diagTouchIrqDetached = false;
-    Serial.println("DIAG: touch IRQ/I2C restored");
-  }
-  if (!diagTouchPaused) handleTouch();
+  // Normal touch input. The temporary 20-second hardware isolation is over.
+  handleTouch();
   handleSerial();
   ensureMon();
 
@@ -1381,37 +1355,80 @@ void loop() {
     nvsReport("health");
   }
 
-  // Menu/list interaction: redraw more responsively while changing-area
-  // flush avoids sending identical frames. Keep the original conservative
-  // timing for gameplay and pet animations.
+  // Scrolling list screens contain no continuous animation. Redrawing their
+  // identical framebuffer every 55 ms caused a visible AMOLED transfer flash
+  // on touch-down and release. Keep touch polling at 50 Hz, but present a new
+  // frame ONLY when the screen or its visible state actually changes.
+  // Animated scenes retain the normal time-based cadence.
   const uint32_t frameInterval =
       (menuOpen || settingsOpen || wifiOpen || galleryOpen || gymOpen ||
        bagOpen || partyOpen || martOpen || playerOpen || expeditionOpen ||
        habitatEditOpen) ? 55u :
       ((gameOpen || sackOpen || spdOpen) ? 85u : 100u);
-  // Diagnostic: freeze SETTINGS and MAIN MENU after the first full frame.
-  // The Main Menu still accepts touch input, but dragging will not visually
-  // update its rows while the test is active. Opening another screen restores
-  // ordinary rendering. This tests touch without ongoing menu QSPI transfers.
-  static uint8_t diagPreviousScreen = 255;
-  static int diagPreviousReset = -1;
-  const uint8_t diagScreen = uiCurrentScreen();
-  const bool diagScreenChanged = (diagScreen != diagPreviousScreen) ||
-                                 ((int)resetView != diagPreviousReset);
-  diagPreviousScreen = diagScreen;
-  diagPreviousReset = (int)resetView;
-  if ((diagScreen == SCR_SETTINGS && resetView == RESET_NONE) ||
-      (diagScreen == SCR_MENU && menuOpen)) {
-    if (diagScreenChanged) {
-      lastRender = now;
-      render();
-    }
-    return;
+  const uint8_t screen = uiCurrentScreen();
+  int32_t stateA = 0, stateB = 0, stateC = 0, stateD = 0;
+  bool redrawOnChange = true;
+  switch (screen) {
+    case SCR_MENU:
+      stateA = menuScroll;
+      stateB = pet.registeredCount();
+      stateC = (pet.canFarewellNow() ? 1 : 0) |
+               (pet.canRetireNow() ? 2 : 0) |
+               (expeditions.active() ? 4 : 0) |
+               (pet.isEgg() ? 8 : 0) | (pet.ceremony ? 16 : 0);
+      break;
+    case SCR_SETTINGS:
+      // Reset confirmations share the same screen ID; include resetView so
+      // returning from a confirmation always restores the Settings list.
+      stateB = (int32_t)resetView;
+      if (resetView == RESET_NONE) stateA = settingsScroll;
+      else redrawOnChange = false;
+      break;
+    case SCR_MART:
+      stateA = martScroll;
+      stateB = (martDecorTab ? 1 : 0) |
+               ((int32_t)martConfirmItem << 1) |
+               ((int32_t)martConfirmDecor << 16);
+      stateC = (int32_t)pet.wallet;
+      stateD = (int32_t)pet.stepsTotal;
+      break;
+    case SCR_GYM:
+      stateA = gymScroll;
+      stateB = gymHard ? 1 : 0;
+      stateC = gymRegion;
+      stateD = pet.badgeCountIn(gymRegion, gymHard);
+      break;
+    case SCR_GYMPICK:
+      stateA = regionScroll;
+      stateB = gymHard ? 1 : 0;
+      stateC = gymRegion;
+      break;
+    case SCR_DEXPICK:
+      stateA = regionScroll;
+      stateB = rpickPage;
+      stateC = pet.registeredCount();
+      break;
+    default:
+      redrawOnChange = false;
+      break;
   }
 
-  if (now - lastRender >= frameInterval || diagScreenChanged) {
+  // Cached values represent the last frame actually SENT, not the last
+  // loop() iteration. Otherwise a drag within the frame interval could be
+  // discarded before it was ever drawn.
+  static uint8_t lastDrawnScreen = 255;
+  static int32_t lastA = INT32_MIN, lastB = INT32_MIN;
+  static int32_t lastC = INT32_MIN, lastD = INT32_MIN;
+  const bool newScreen = screen != lastDrawnScreen;
+  const bool stateChanged = stateA != lastA || stateB != lastB ||
+                            stateC != lastC || stateD != lastD;
+  const uint32_t minInterval = redrawOnChange ? 75u : frameInterval;
+  const bool due = (uint32_t)(now - lastRender) >= minInterval;
+  if (newScreen || (due && (!redrawOnChange || stateChanged))) {
     lastRender = now;
     render();
+    lastDrawnScreen = screen;
+    lastA = stateA; lastB = stateB; lastC = stateC; lastD = stateD;
   }
 }
 
@@ -1783,8 +1800,7 @@ static int16_t *uiListScrollPtr() {
     case SCR_BAGSCR: return &bagScroll;
     case SCR_MOVEPICK: return &moveScroll;
     case SCR_MENU: return &menuScroll;
-    // Legacy Settings comparison: no scrolling or touch-down drag handling.
-    case SCR_SETTINGS: return nullptr;
+    case SCR_SETTINGS: return resetView == RESET_NONE ? &settingsScroll : nullptr;
     case SCR_WIFI:
       if (wifiView == WIFI_HOME) return &wifiHomeScroll;
       if(wifiView==WIFI_NEARBY||wifiView==WIFI_SAVED)return &wifiScroll;
@@ -1814,7 +1830,9 @@ static bool uiListGeometry(int *y0, int *y1, int *stride, int *count) {
     }
     case SCR_MENU:
       top=MENU_LIST_TOP;bot=MENU_LIST_BOTTOM;step=MENU_ROW_STEP;n=MENU_ROWS;break;
-    case SCR_SETTINGS: return false;
+    case SCR_SETTINGS:
+      if (resetView != RESET_NONE) return false;
+      top=104;bot=373;step=86;n=4;break;
     case SCR_WIFI:
       if (wifiView == WIFI_HOME) {
         top=140;bot=375;step=80;n=4;break;

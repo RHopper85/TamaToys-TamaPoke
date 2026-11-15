@@ -122,17 +122,20 @@ static void renderResetConfirm() {
 #define SETTINGS_ROW_COUNT 4
 void renderSettingsHub() {
   if (resetView != RESET_NONE) { renderResetConfirm(); return; }
-  // Diagnostic: restore the non-scrollable Settings layout from the
-  // revision before the November 13 scrollable-menu change.
   wifiFrame("SETTINGS");
-  wifiLabel("DEVICE OPTIONS", 84, 1, GBA_TEAL);
-  wifiButton(99, 105, 268, 43, "TIME / SOUND");
-  wifiButton(99, 154, 268, 43, "WI-FI");
-  wifiLabel("SAVE MANAGEMENT", 202, 1, GBA_PURPLE);
-  wifiButton(99, 220, 268, 43, "NEW GAME");
-  wifiButton(99, 277, 268, 43, "FACTORY RESET");
-  wifiLabel("DIAG: TOUCH OFF 20 SEC", 347, 1, GBA_RED);
-  wifiButton(132, 382, 202, 34, "BACK");
+  wifiLabel("SWIPE TO SCROLL", 85, 1, GBA_TEAL);
+  static const char *const labels[SETTINGS_ROW_COUNT] = {
+    "TIME / SOUND", "WI-FI", "NEW GAME", "FACTORY RESET"
+  };
+  settingsScroll = (int16_t)uiListClamp(settingsScroll);
+  for (int i = 0; i < SETTINGS_ROW_COUNT; ++i) {
+    const int y = SETTINGS_ROW_TOP + i * SETTINGS_ROW_STEP - settingsScroll;
+    if (y < SETTINGS_ROW_TOP || y + SETTINGS_ROW_H > SETTINGS_ROW_BOTTOM) continue;
+    wifiButton(99, y, 268, SETTINGS_ROW_H, labels[i]);
+  }
+  uiListDrawBar(SETTINGS_ROW_TOP, SETTINGS_ROW_BOTTOM,
+                SETTINGS_ROW_COUNT, SETTINGS_ROW_STEP, settingsScroll);
+  wifiButton(132, 389, 202, 46, "BACK");
   gfx->flush();
 }
 
@@ -171,25 +174,28 @@ void settingsHubTap(int16_t x, int16_t y) {
     }
     return;
   }
-  if (wifiHit(x, y, 99, 105, 268, 43)) {
-    openClock();
-    sfxPlay(SFX_TAP);
-  } else if (wifiHit(x, y, 99, 154, 268, 43)) {
-    wifiOpen = true;
-    wifiView = WIFI_HOME;
-    wifiPage = 0;
-    wifiHomeScroll = 0;
-    sfxPlay(SFX_TAP);
-  } else if (wifiHit(x, y, 99, 220, 268, 43)) {
-    resetView = RESET_NEW_GAME;
-    sfxPlay(SFX_TAP);
-  } else if (wifiHit(x, y, 99, 277, 268, 43)) {
-    resetView = RESET_FACTORY;
-    sfxPlay(SFX_TAP);
-  } else if (wifiHit(x, y, 132, 382, 202, 34)) {
+  if (wifiHit(x, y, 132, 389, 202, 46)) {
     settingsOpen = false;
     sfxPlay(SFX_TAP);
+    return;
   }
+  const int choice = uiListIndexAt(y, SETTINGS_ROW_TOP, SETTINGS_ROW_BOTTOM,
+                                   SETTINGS_ROW_STEP, SETTINGS_ROW_H,
+                                   settingsScroll, SETTINGS_ROW_COUNT);
+  if (choice < 0 || !wifiHit(x, y, 99, SETTINGS_ROW_TOP, 268,
+                              SETTINGS_ROW_BOTTOM - SETTINGS_ROW_TOP)) return;
+  switch (choice) {
+    case 0: openClock(); break;
+    case 1:
+      wifiOpen = true;
+      wifiView = WIFI_HOME;
+      wifiPage = 0;
+      wifiHomeScroll = 0;
+      break;
+    case 2: resetView = RESET_NEW_GAME; break;
+    case 3: resetView = RESET_FACTORY; break;
+  }
+  sfxPlay(SFX_TAP);
 }
 
 uint8_t wifiPages() {
