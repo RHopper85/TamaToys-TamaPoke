@@ -9,7 +9,7 @@
 //
 // Los sprites y la tabla de especies se generan con tools/sprites.py (emit).
 
-// Upload Test v1.0
+// Upload Test v1.1 - QSPI Full Flush Isolation
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -175,7 +175,10 @@ class TamaSmoothCanvas : public Arduino_Canvas {
     _valid = true;
   }
 };
-TamaSmoothCanvas *gfx = new TamaSmoothCanvas(LCD_WIDTH, LCD_HEIGHT, panel);
+// Diagnostic: use the library's stock canvas on hardware, bypassing the
+// custom per-band QSPI transfer path. This isolates partial-flush behavior
+// without changing gameplay, the menu, brightness, or saved data.
+Arduino_Canvas *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel);
 #else
 // Emulator keeps its existing drawing and flush behavior.
 Arduino_Canvas *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel);
