@@ -9,7 +9,7 @@
 //
 // Los sprites y la tabla de especies se generan con tools/sprites.py (emit).
 
-// Patch Test: Touch Isolation 20s Test
+// Patch Test: Main Menu FrozenFrame Isolation
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -1389,11 +1389,10 @@ void loop() {
        bagOpen || partyOpen || martOpen || playerOpen || expeditionOpen ||
        habitatEditOpen) ? 55u :
       ((gameOpen || sackOpen || spdOpen) ? 85u : 100u);
-  // Hardware diagnostic: hold the SETTINGS pixels completely still.
-  // Touch polling and menu actions continue to run normally, but once
-  // Settings has been drawn no further QSPI frame is sent until the active
-  // screen changes or a reset confirmation opens. A touch-triggered flash
-  // here would therefore not be caused by redraws of the Settings menu.
+  // Diagnostic: freeze SETTINGS and MAIN MENU after the first full frame.
+  // The Main Menu still accepts touch input, but dragging will not visually
+  // update its rows while the test is active. Opening another screen restores
+  // ordinary rendering. This tests touch without ongoing menu QSPI transfers.
   static uint8_t diagPreviousScreen = 255;
   static int diagPreviousReset = -1;
   const uint8_t diagScreen = uiCurrentScreen();
@@ -1401,7 +1400,8 @@ void loop() {
                                  ((int)resetView != diagPreviousReset);
   diagPreviousScreen = diagScreen;
   diagPreviousReset = (int)resetView;
-  if (diagScreen == SCR_SETTINGS && resetView == RESET_NONE) {
+  if ((diagScreen == SCR_SETTINGS && resetView == RESET_NONE) ||
+      (diagScreen == SCR_MENU && menuOpen)) {
     if (diagScreenChanged) {
       lastRender = now;
       render();
