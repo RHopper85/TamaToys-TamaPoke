@@ -9,7 +9,7 @@
 //
 // Los sprites y la tabla de especies se generan con tools/sprites.py (emit).
 
-// Patch Test: Change Driven Menu Render
+// Patch Test: Global Unchanged Frame Skip
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -74,6 +74,11 @@ Arduino_CO5300 *panel = new Arduino_CO5300(
 // If PSRAM is low, fall back to Arduino_Canvas::flush() automatically.
 #ifdef ARDUINO_ARCH_ESP32
 #include <esp_heap_caps.h>
+// Keep a snapshot of the last complete frame presented to the CO5300.
+// Static menus may be rendered repeatedly by legacy screen handlers; those
+// identical frames must NOT trigger an extra full-screen QSPI transfer.
+// Unlike the earlier experiment, this does not make partial/row-band writes.
+// Every changed frame uses Arduino_GFX's ordinary full-frame transfer.
 class TamaSmoothCanvas : public Arduino_Canvas {
  public:
   TamaSmoothCanvas(int16_t w, int16_t h, Arduino_G *output)
@@ -85,81 +90,31 @@ class TamaSmoothCanvas : public Arduino_Canvas {
 
   void flush(bool force_flush = false) override {
     if (!_framebuffer || !_output) return;
-    constexpr int kW = LCD_WIDTH;
-    constexpr int kH = LCD_HEIGHT;
-    constexpr size_t kBytes = (size_t)kW * kH * sizeof(uint16_t);
+    constexpr size_t kBytes =
+        (size_t)LCD_WIDTH * LCD_HEIGHT * sizeof(uint16_t);
 
-    // The display and canvas are constructed with rotation 0. If that ever
-    // changes, use the library's own flush (it handles rotations itself).
+    if (!_allocTried) {
+      _allocTried = true;
+      _lastShown = (uint16_t *)heap_caps_malloc(
+          kBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      if (!_lastShown)
+        Serial.println("display: unchanged-frame skip unavailable (PSRAM)");
+    }
+    // A rotated framebuffer has a different memory layout. Keep default
+    // Arduino_GFX behavior until rotation-aware snapshots are implemented.
     if (_rotation != 0) {
       Arduino_Canvas::flush(force_flush);
       _valid = false;
       return;
     }
-    if (!_allocTried) {
-      _allocTried = true;
-      _lastShown = (uint16_t *)heap_caps_malloc(
-          kBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-      if (!_lastShown) Serial.println("ui: partial flush unavailable; using full frames");
+    if (!force_flush && _lastShown && _valid &&
+        memcmp(_lastShown, _framebuffer, kBytes) == 0) {
+      return; // Nothing visible changed: do not send a frame to the panel.
     }
-    if (!_lastShown) { Arduino_Canvas::flush(force_flush); return; }
-
-    if (force_flush || !_valid) {
-      Arduino_Canvas::flush(force_flush);
+    Arduino_Canvas::flush(force_flush);
+    if (_lastShown) {
       memcpy(_lastShown, _framebuffer, kBytes);
       _valid = true;
-      return;
-    }
-
-    // Fold short unchanged gaps into neighboring bands to avoid many small
-    // QSPI transactions. Too many or too-large bands are sent as one full
-    // frame instead. No changes = no panel transfer at all.
-    struct Band { int16_t top, end; } bands[8];
-    int count = 0;
-    int lastChange = -100;
-    for (int y = 0; y < kH; ++y) {
-      const size_t off = (size_t)y * kW;
-      if (memcmp(_framebuffer + off, _lastShown + off,
-                 kW * sizeof(uint16_t)) == 0) continue;
-      if (count == 0 || y - lastChange > 4) {
-        if (count == 8) {
-          // Avoid switching transport modes during fragmented menu updates.
-          // One continuous band includes every changed row, so the snapshot
-          // and actual display stay synchronized.
-          bands[0].end = kH;
-          count = 1;
-          break;
-        }
-        bands[count].top = (int16_t)y;
-        bands[count].end = (int16_t)(y + 1);
-        ++count;
-      } else {
-        bands[count - 1].end = (int16_t)(y + 1);
-      }
-      lastChange = y;
-    }
-    if (!count) return;
-
-    int changedRows = 0;
-    for (int i = 0; i < count; ++i)
-      changedRows += bands[i].end - bands[i].top;
-    if (changedRows >= (kH * 3) / 4) {
-      // Use the same panel transport as partial updates. The base canvas
-      // full flush may use a different transfer path during touch events.
-      _output->draw16bitRGBBitmap(_output_x, _output_y,
-                                  _framebuffer, kW, kH);
-      memcpy(_lastShown, _framebuffer, kBytes);
-      return;
-    }
-
-    for (int i = 0; i < count; ++i) {
-      const int y = bands[i].top;
-      const int h = bands[i].end - y;
-      const size_t off = (size_t)y * kW;
-      _output->draw16bitRGBBitmap(_output_x, _output_y + y,
-                                  _framebuffer + off, kW, h);
-      memcpy(_lastShown + off, _framebuffer + off,
-             (size_t)h * kW * sizeof(uint16_t));
     }
   }
 
@@ -167,18 +122,10 @@ class TamaSmoothCanvas : public Arduino_Canvas {
   uint16_t *_lastShown = nullptr;
   bool _allocTried = false;
   bool _valid = false;
-
-  void flushFull() {
-    Arduino_Canvas::flush();
-    memcpy(_lastShown, _framebuffer,
-           (size_t)LCD_WIDTH * LCD_HEIGHT * sizeof(uint16_t));
-    _valid = true;
-  }
 };
-// Diagnostic: use the library's stock canvas on hardware, bypassing the
-// custom per-band QSPI transfer path. This isolates partial-flush behavior
-// without changing gameplay, the menu, brightness, or saved data.
-Arduino_Canvas *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel);
+// Apply duplicate-frame suppression to EVERY hardware screen. Keep the
+// desktop emulator unchanged; it doesn't use the physical CO5300 bus.
+Arduino_Canvas *gfx = new TamaSmoothCanvas(LCD_WIDTH, LCD_HEIGHT, panel);
 #else
 // Emulator keeps its existing drawing and flush behavior.
 Arduino_Canvas *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel);
