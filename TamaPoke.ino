@@ -9,7 +9,7 @@
 //
 // Los sprites y la tabla de especies se generan con tools/sprites.py (emit).
 
-// Upload Test v1.1 - QSPI Full Flush Isolation
+// Patch Test: Frozen Frame Diagnostic
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -1362,7 +1362,27 @@ void loop() {
        bagOpen || partyOpen || martOpen || playerOpen || expeditionOpen ||
        habitatEditOpen) ? 55u :
       ((gameOpen || sackOpen || spdOpen) ? 85u : 100u);
-  if (now - lastRender >= frameInterval) {
+  // Hardware diagnostic: hold the SETTINGS pixels completely still.
+  // Touch polling and menu actions continue to run normally, but once
+  // Settings has been drawn no further QSPI frame is sent until the active
+  // screen changes or a reset confirmation opens. A touch-triggered flash
+  // here would therefore not be caused by redraws of the Settings menu.
+  static uint8_t diagPreviousScreen = 255;
+  static int diagPreviousReset = -1;
+  const uint8_t diagScreen = uiCurrentScreen();
+  const bool diagScreenChanged = (diagScreen != diagPreviousScreen) ||
+                                 ((int)resetView != diagPreviousReset);
+  diagPreviousScreen = diagScreen;
+  diagPreviousReset = (int)resetView;
+  if (diagScreen == SCR_SETTINGS && resetView == RESET_NONE) {
+    if (diagScreenChanged) {
+      lastRender = now;
+      render();
+    }
+    return;
+  }
+
+  if (now - lastRender >= frameInterval || diagScreenChanged) {
     lastRender = now;
     render();
   }
