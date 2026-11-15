@@ -9,7 +9,7 @@
 //
 // Los sprites y la tabla de especies se generan con tools/sprites.py (emit).
 
-// Patch Test: Global Unchanged Frame Skip
+// Patch Test: Dirty Rectangle Display Fix
 
 #include <Arduino.h>
 #include <Wire.h>
