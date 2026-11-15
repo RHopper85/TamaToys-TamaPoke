@@ -1736,7 +1736,8 @@ static int16_t *uiListScrollPtr() {
     case SCR_BAGSCR: return &bagScroll;
     case SCR_MOVEPICK: return &moveScroll;
     case SCR_MENU: return &menuScroll;
-    case SCR_SETTINGS: return resetView == RESET_NONE ? &settingsScroll : nullptr;
+    // Legacy Settings comparison: no scrolling or touch-down drag handling.
+    case SCR_SETTINGS: return nullptr;
     case SCR_WIFI:
       if (wifiView == WIFI_HOME) return &wifiHomeScroll;
       if(wifiView==WIFI_NEARBY||wifiView==WIFI_SAVED)return &wifiScroll;
@@ -1766,9 +1767,7 @@ static bool uiListGeometry(int *y0, int *y1, int *stride, int *count) {
     }
     case SCR_MENU:
       top=MENU_LIST_TOP;bot=MENU_LIST_BOTTOM;step=MENU_ROW_STEP;n=MENU_ROWS;break;
-    case SCR_SETTINGS:
-      if (resetView != RESET_NONE) return false;
-      top=104;bot=373;step=86;n=4;break;
+    case SCR_SETTINGS: return false;
     case SCR_WIFI:
       if (wifiView == WIFI_HOME) {
         top=140;bot=375;step=80;n=4;break;
