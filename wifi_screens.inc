@@ -131,6 +131,7 @@ void renderSettingsHub() {
   wifiLabel("SAVE MANAGEMENT", 202, 1, GBA_PURPLE);
   wifiButton(99, 220, 268, 43, "NEW GAME");
   wifiButton(99, 277, 268, 43, "FACTORY RESET");
+  wifiLabel("DIAG: TOUCH OFF 20 SEC", 347, 1, GBA_RED);
   wifiButton(132, 382, 202, 34, "BACK");
   gfx->flush();
 }

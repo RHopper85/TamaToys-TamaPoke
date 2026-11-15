@@ -9,7 +9,7 @@
 //
 // Los sprites y la tabla de especies se generan con tools/sprites.py (emit).
 
-// Patch Test: Frozen Frame Diagnostic
+// Patch Test: Touch Isolation 20s Test
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -1249,7 +1249,34 @@ void loop() {
   if (runReady && !wasRunReady) sfxPlay(SFX_DENY);
   wasRunReady = runReady;
 
-  handleTouch();
+  // Hardware isolation test: after entering Settings, disable BOTH the
+  // CST9217 interrupt and I2C touch reads for 20 seconds. The display stays
+  // powered and the rest of loop() runs normally. A flash on physical contact
+  // during this interval cannot be caused by our touch ISR or getPoint().
+  // Resume input automatically so the Settings screen is not trapped.
+  static bool diagWasSettings = false;
+  static bool diagTouchIrqDetached = false;
+  static uint32_t diagSettingsEntered = 0;
+  const bool diagSettings = uiCurrentScreen() == SCR_SETTINGS &&
+                            resetView == RESET_NONE;
+  if (diagSettings && !diagWasSettings) {
+    diagSettingsEntered = millis();
+    Serial.println("DIAG: 20-second touch IRQ/I2C isolation started");
+  }
+  diagWasSettings = diagSettings;
+  const bool diagTouchPaused = diagSettings &&
+      (uint32_t)(millis() - diagSettingsEntered) < 20000u;
+  if (diagTouchPaused && !diagTouchIrqDetached) {
+    detachInterrupt(digitalPinToInterrupt(TP_INT));
+    gTouchIrq = false;
+    diagTouchIrqDetached = true;
+  } else if (!diagTouchPaused && diagTouchIrqDetached) {
+    attachInterrupt(digitalPinToInterrupt(TP_INT), touchIsr, FALLING);
+    gTouchIrq = false;
+    diagTouchIrqDetached = false;
+    Serial.println("DIAG: touch IRQ/I2C restored");
+  }
+  if (!diagTouchPaused) handleTouch();
   handleSerial();
   ensureMon();
 
